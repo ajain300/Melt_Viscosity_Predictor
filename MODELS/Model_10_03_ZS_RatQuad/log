@@ -1,0 +1,89 @@
+
+Code /home/appls/machine_learning/PolymerGenome/bin/ml 2019.04.19
+Ramprasad Research Group, Georgia Institute of Technology
+Machine learning model training using XY dataset
+
+input_ml read in ...
+  file_fp_prop            = zero_shear_data_10_03.xlsx
+  file_model              = model.pkl     ! Warning: Model file name is not defined. [file_model] Default setting applied
+  col_Y                   = Melt_Viscosity
+  log_Y                   = log10
+  col_id                  = INDEX
+  ML_algo                 = GPR           ! Warning: ML algorithm is not defined. Default setting applied.
+  ML_noise                = -1            ! Warning: Kernel noise parameter is not defined. Default setting applied.
+  ML_kernel               = 1
+  ML_n_fold_CV            = 5             ! Warning: CV n_fold is not defined. Default setting applied.
+  ML_train_size           = 0.8           ! Warning: Train set size is not defined. Default setting applied.
+  ML_fp_scale             = 1             ! Warning: Scaling option is not set. Default setting (1=do scaling) applied.
+  ML_trainset_shuffle     = 1             ! Warning: Shuffle option is not set. Default setting (1=do shuffle) applied.
+  file_parity             = parity.jpg    ! Warning: File name for parity plot is not defined. Default setting applied.
+  file_trainset           = trainset.csv  ! Warning: File name for trainset is not defined. Default setting applied.
+  file_testset            = testset.csv   ! Warning: File name for testset is not defined. Default setting applied.
+  file_parameters         = file_parameters.csv  ! Warning: File name for model parameters is not defined. Default setting applied.
+input_ml read in ... ok
+
+Start model training ...
+    Dataset size      = 303
+    Trainset size     = 242 ( 80.0 %)
+Kernel initialization ... 
+    Average of Y = 4.159844000609287
+    Noise estimated   = 0.8847265557437499 ... ^2 = 0.7827410784381986
+    Noise Lower Bound = 0.22118163893593748 ... ^2 = 0.048921317402387414
+    Noise Upper Bound = 9.73199211318125 ... ^2 = 94.71167049102203
+    Initial kernel    = 4.16**2 * RationalQuadratic(alpha=1, length_scale=1) + WhiteKernel(noise_level=0.783)
+    Entering CV loop ...
+        CV n = 0 ... RMSE(CV, train) = 0.07536144464450209
+                     RMSE(CV, test) = 1.1024463711815844
+                     |RMSE(CV, train) - RMSE(CV, test)| = 1.0270849265370823
+                     MAPE(CV, train) = 8.986986914623381
+                     MAPE(CV, test) = 12236.841650413366
+                     Kernel = 7.02**2 * RationalQuadratic(alpha=0.00815, length_scale=0.0185) + WhiteKernel(noise_level=0.0489)
+        CV n = 1 ... RMSE(CV, train) = 0.0943813163042975
+                     RMSE(CV, test) = 0.8563788106640055
+                     |RMSE(CV, train) - RMSE(CV, test)| = 0.761997494359708
+                     MAPE(CV, train) = 11.622981805508346
+                     MAPE(CV, test) = 246.32161273929998
+                     Kernel = 6.73**2 * RationalQuadratic(alpha=0.00939, length_scale=0.0175) + WhiteKernel(noise_level=0.0489)
+        CV n = 2 ... RMSE(CV, train) = 0.18275949534744293
+                     RMSE(CV, test) = 0.853177360244256
+                     |RMSE(CV, train) - RMSE(CV, test)| = 0.670417864896813
+                     MAPE(CV, train) = 27.752085961021933
+                     MAPE(CV, test) = 3316.504663279924
+                     Kernel = 7.15**2 * RationalQuadratic(alpha=0.00769, length_scale=0.0172) + WhiteKernel(noise_level=0.124)
+        CV n = 3 ... RMSE(CV, train) = 0.20010740136349073
+                     RMSE(CV, test) = 0.7766127095248163
+                     |RMSE(CV, train) - RMSE(CV, test)| = 0.5765053081613256
+                     MAPE(CV, train) = 31.775995803846165
+                     MAPE(CV, test) = 153.2272621286527
+                     Kernel = 6.73**2 * RationalQuadratic(alpha=0.00969, length_scale=0.0223) + WhiteKernel(noise_level=0.142)
+        CV n = 4 ... RMSE(CV, train) = 0.19763445061315246
+                     RMSE(CV, test) = 1.2458721399379344
+                     |RMSE(CV, train) - RMSE(CV, test)| = 1.048237689324782
+                     MAPE(CV, train) = 32.09453843716699
+                     MAPE(CV, test) = 656.1206531043697
+                     Kernel = 6.41**2 * RationalQuadratic(alpha=0.0092, length_scale=0.0175) + WhiteKernel(noise_level=0.139)
+        Kernel hyperparameters optimized & fixed at CV n = 3
+    Final kernel selected = 6.73**2 * RationalQuadratic(alpha=0.00969, length_scale=0.0223) + WhiteKernel(noise_level=0.142)
+Trainset saved in:   trainset.csv
+Testset saved in:    testset.csv
+Maximum distance from PCA centroid (origin) =  5.519566519663338
+GPR model created:   model.pkl
+
+Performance summary
+--------------------------------------------------------------------------
+                         Y    R2_train     R2_test  rmse_train   rmse_test
+--------------------------------------------------------------------------
+            Melt_Viscosity       0.995       0.751       0.190       1.476
+--------------------------------------------------------------------------
+--------------------------------------------------------------------------
+                         YRMSE(CV,train)RMSE(CV,test)MAPE(CV,train)MAPE(CV,test)
+--------------------------------------------------------------------------
+            Melt_Viscosity       0.150       0.967      22.447    3321.803
+--------------------------------------------------------------------------
+Model training finished.
+
+Job summary
+  Start time             = 2021-10-03 14:44:15.721467
+  Finish time            = 2021-10-03 14:44:25.998805
+  Elapsed time           = 0:00:10.277338
+Done

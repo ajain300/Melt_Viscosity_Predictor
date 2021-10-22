@@ -1,0 +1,7 @@
+#input and features
+file_fp_prop      = zero_shear_data_10_03.xlsx
+col_X             = aT bT m e Mw Temperature Shear_Rate    # aT(Atom triple), bT (Block triple), m(QSPR), e(Morphological)
+col_Y             = Melt_Viscosity  
+col_id            = INDEX
+log_Y             = log10
+ML_kernel = 1
