@@ -3,8 +3,13 @@ from random import sample
 import numpy as np
 from sklearn.model_selection import train_test_split
 import pandas as pd
+import gpflow
+from validation.metrics import MSE
 
 def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp,S_scaler=None, T_scaler=None, M_scaler= None):
+    """
+    Learnng curve test for general NN.
+    """
     tr_sizes = list(np.linspace(0.10, 0.90, 9))
     train_error = []
     test_error = []
@@ -22,10 +27,18 @@ def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp,S_scaler=None, 
 
     return tr_sizes, train_error, test_error
 
-def crossval_NN(create_model, XX, yy, M, S, T, S_scaler=None, T_scaler=None, M_scaler= None, verbose = 0, random_state = None):
-    kf = KFold(n_splits=5, shuffle = True, random_state = random_state)
+    #To run learning curve test ex:
+    #n, train, test = viscNN_LC(create_ViscNN_comb, X_tot, Y_tot, logMw, log_shear, Temp, S_scaler= S_scaler, T_scaler=T_scaler,M_scaler= M_scaler)
+    # plt.plot(n, train)
+    # plt.plot(n, test)
+    # plt.legend(['Train','Test'])
+
+
+def crossval_NN(create_model, XX, yy, M, S, T, gr_Mcr, verbose = 1, random_state = None, epochs = 500):
+    kf = KFold(n_splits=10, shuffle = True, random_state = random_state)
     m = []
     error = []
+    hist = []
     for train_index, test_index in kf.split(XX):
         X_train, X_val = XX[train_index], XX[test_index]
         y_train, y_val = yy[train_index], yy[test_index]
@@ -34,22 +47,58 @@ def crossval_NN(create_model, XX, yy, M, S, T, S_scaler=None, T_scaler=None, M_s
         T_train, T_val = T[train_index], T[test_index]
         n_features = X_train.shape[1]
         m.append(create_model(n_features))
-        if S_scaler is None:
+        if create_model.__name__ == 'create_ViscNN_concat':
             fit_in = [X_train, M_train, S_train, T_train]
             eval_in = [X_val, M_val, S_val, T_val]
-        elif T_scaler is None:
-            fit_in = [X_train, M_train, T_train, np.power(10, M_scaler.inverse_transform(M_train)), S_train]
-            eval_in = [X_val, M_val, T_val, np.power(10, M_scaler.inverse_transform(M_val)), S_val]
-        else:
-            fit_in = [X_train, M_train, S_train, T_train, M_scaler.inverse_transform(M_train), S_scaler.inverse_transform(S_train), T_scaler.inverse_transform(T_train)]
-            eval_in = [X_val, M_val, S_val, T_val, M_scaler.inverse_transform(M_val), S_scaler.inverse_transform(S_val), T_scaler.inverse_transform(T_val)]
-        m[-1].fit(fit_in, y_train, epochs=300, batch_size=30, verbose=0)
-        error.append(m[-1].evaluate(eval_in, y_val, verbose=0))
+        elif create_model.__name__ == 'create_ViscNN_phys':
+            fit_in = [X_train, M_train, S_train, T_train]
+            eval_in = [X_val, M_val, S_val, T_val]
+        hist.append(m[-1].fit(fit_in, y_train, epochs=epochs, batch_size=30, validation_data = (eval_in, y_val) ,verbose=0))
         if verbose > 0:
-            print('MSE: %.3f, RMSE: %.3f' % (error[-1], np.sqrt(error[-1])))
-    if verbose > 0:
-        print('CV MSE error:' + str(np.mean(error)))
-    return m[error.index(min(error))]
+            #print('MSE: %.3f, RMSE: %.3f' % (error[-1], np.sqrt(error[-1])))
+            print('Trained fold ' + str(len(hist)) + ' ...')
+            print('CV Error ' + str(len(hist)) + ': ' + str(hist[-1].history['val_loss'][-1]))
+    #if verbose > 0:
+        #print('CV MSE error:' + str(np.mean(error)))
+    return m, hist
+
+
+def crossval_compare(NN_models, XX, yy, M, S, T, gr_Mcr , verbose = 1, random_state = None, epochs = 500, gpr_model = None):
+    kf = KFold(n_splits=10, shuffle = True, random_state = random_state)
+    NN = [[] for i in range(len(NN_models))]
+    gpr = []
+    gp_cv = []
+    hist = [[] for i in range(len(NN_models))]
+    for train_index, test_index in kf.split(XX):
+        X_train, X_val = XX[train_index], XX[test_index]
+        y_train, y_val = yy[train_index], yy[test_index]
+        M_train, M_val = M[train_index], M[test_index]
+        S_train, S_val = S[train_index], S[test_index]
+        T_train, T_val = T[train_index], T[test_index]
+        gr_Mcr_train, gr_Mcr_val = gr_Mcr[train_index], gr_Mcr[test_index]
+        n_features = X_train.shape[1]
+        for i in range(len(NN_models)): NN[i].append(NN_models[i](n_features))
+        fit_in = [X_train, M_train, S_train, T_train, gr_Mcr_train]
+        eval_in = [X_val, M_val, S_val, T_val, gr_Mcr_val]
+        for i in range(len(NN_models)): hist[i].append(NN[i][-1].fit(fit_in, y_train, epochs=epochs, batch_size=30, validation_data = (eval_in, y_val) ,verbose=0))
+        if gpr_model:
+            X_train_ = np.concatenate((X_train, M_train, S_train, T_train), axis = 1)
+            X_test_ = np.concatenate((X_val, M_val, S_val, T_val), axis = 1)
+            gpr.append(gpr_model(X_train_, y_train))
+            m = gpr[-1]
+            opt = gpflow.optimizers.Scipy()
+            opt_logs = opt.minimize(m.training_loss, m.trainable_variables, options=dict(maxiter=100))
+            mean, var = m.predict_y(X_test_)
+            gp_cv.append(MSE(mean, y_val))
+        if verbose > 0:
+            #print('MSE: %.3f, RMSE: %.3f' % (error[-1], np.sqrt(error[-1])))
+            print('Trained fold ' + str(len(hist[-1])) + ' ...')
+            for i in range(len(NN_models)):
+                print('CV Error ' + NN_models[i].__name__ + ': ' + str(hist[i][-1].history['val_loss'][-1]))
+            if gpr_model: print('CV Error GPR: ' + str(gp_cv[-1]))
+    #if verbose > 0:
+        #print('CV MSE error:' + str(np.mean(error)))
+    return NN, hist, gpr, gp_cv
 
 def delete_outlier(model, y_pred, y_test, TH = 12):
     ind = []
@@ -89,7 +138,7 @@ def Mw_extrapolation(data:pd.DataFrame, n_samples):
 
     z_shear_samples = []
     sample_id = list(data.loc[data['Shear_Rate'] == 0].agg({'SAMPLE_ID': 'unique'})[0])
-    zero_shear_data = data[data['SAMPLE_ID'].isin(z_shear_samples)]
+
     for i in range(len(sample_id)):
         if sum(data.loc[data['SAMPLE_ID'] == sample_id[i], 'Shear_Rate'].to_list()) == 0:
             z_shear_samples.append(i)
@@ -194,6 +243,7 @@ def Mw_test(samples_df: pd.DataFrame, samps):
         tests['logMw'] = logMw
         tests['Temperature'] = trial['Temperature'].values[0]
         tests['Shear_Rate'] = trial['Shear_Rate'].values[0]
+        tests['Polymer'] = trial['Polymer'].values[0]
         tests.loc[[i for i in tests.index], fp_cols + ['SMILES']] = np.array(fp)
 
         if trial['Shear_Rate'].values[0] != 0:
@@ -222,6 +272,108 @@ def Mw_test(samples_df: pd.DataFrame, samps):
         out.append({'tests':tests, 'data_in':[XX, OH_shear,M,S,T,y]})
 
     return out
+
+def shear_extrapolation(data:pd.DataFrame):
+    """
+    Takes in overall data and extrapolates zero-shear Mw values from samples
+    """
+    id = 0
+    temp = data.loc[0, 'Temperature']
+    poly = data.loc[0, 'Polymer']
+    weight = data.loc[0, 'Mw']
+    for i in data.index:
+        if data.loc[i, 'Temperature'] == temp and data.loc[i, 'Polymer'] == poly and weight == data.loc[i, 'Mw']:
+            data.loc[i, 'SAMPLE_ID'] = id
+        else:
+            id += 1
+            data.loc[i, 'SAMPLE_ID'] = id
+
+        temp = data.loc[i, 'Temperature']
+        poly = data.loc[i, 'Polymer']
+        weight = data.loc[i, 'Mw']
+
+    fp_cols = []
+    for c in data.columns:
+        if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
+            fp_cols.append(c)
+
+    for c in ['Mw', 'Melt_Viscosity']:
+        data[c] = np.log10(data[c])
+
+    shear_samples = []
+
+    #identify the unique sample numbers, create shear_data to hold these samples
+    sample_id = list(data.loc[data['Shear_Rate'] != 0].agg({'SAMPLE_ID': 'unique'})[0])
+
+    #verify that the shear rate is
+    for i in range(len(sample_id)):
+        if np.prod(data.loc[data['SAMPLE_ID'] == sample_id[i], 'Shear_Rate'].to_list()) != 0:
+            shear_samples.append(i)
+
+
+    PL_data = pd.DataFrame(columns = ['SAMPLE_ID', 'Polymer', 'SMILES', 'Temperature', 'Mw', 'Shear_Rate', 'Melt_Viscosity'])
+
+    sample_data = []
+    for i in sample_id:
+        x = data.loc[data['SAMPLE_ID'] == i, 'Shear_Rate'].to_list()
+        Mw = data.loc[data['SAMPLE_ID'] == i, 'Mw'].to_list()
+        y = data.loc[data['SAMPLE_ID'] == i, 'Melt_Viscosity'].to_list()
+        T =  data.loc[data['SAMPLE_ID'] == i, 'Temperature'].to_list()
+
+        if len(x) < 5: continue
+        if type(x[0]) != float or pd.isnull(x[0]): continue
+
+        ind = np.argsort(x)
+        x = [x[i] for i in ind]
+        y = [y[i] for i in ind]
+        #print(i)
+        sample_data.append([x,y])
+        poly = data.loc[data['SAMPLE_ID'] == i, 'Polymer'].to_list()[0]
+        temp = T[0]
+        weight = Mw[0]
+        p = 2
+        Rel_E = 0
+        log_k_old = 0
+
+        for n in range(len(x)):
+            PL_data = PL_data.append({'SAMPLE_ID' : i, 'Polymer': poly,
+                'SMILES' : data.loc[data['SAMPLE_ID'] == i, 'SMILES'].to_list()[0],
+                'Temperature' : temp, 'Mw': weight, 'Shear_Rate': x[n], 'Melt_Viscosity': y[n]}, ignore_index = True)
+
+    PL_data = PL_data.merge(data[fp_cols + ['SMILES']], on = 'SMILES', how = 'left').drop_duplicates()
+    #PL_data = PL_data.groupby('SAMPLE_ID').max().reset_index()
+
+    return PL_data.reset_index(drop = True)
+
+def shear_test(samples_df: pd.DataFrame, samp):
+    out = []
+    fp_cols = []
+    for c in samples_df.columns:
+        if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
+            fp_cols.append(c)
+    log_shear = pd.Series(np.linspace(-3,7,10))
+    trial = pd.DataFrame(samples_df.loc[samples_df['SAMPLE_ID'] == samp]).reset_index(drop = True)
+    print(trial)
+    fp = trial.loc[0, fp_cols + ['SMILES']]
+    tests = pd.DataFrame()
+    tests['Shear_Rate'] = np.power(10, log_shear)
+    tests['logMw'] = trial.loc[0,'Mw']
+    tests['Temperature'] = trial.loc[0,'Temperature']
+    tests.loc[[i for i in tests.index], fp_cols + ['SMILES']] = np.array(fp)
+
+
+    XX = tests[fp_cols]
+    M = np.array(tests['logMw']).reshape(-1, 1)
+    S = np.array(tests['Shear_Rate']).reshape(-1, 1)
+    T = np.array(tests['Temperature']).reshape(-1, 1)
+    #OH_shear = np.array(tests[['SHEAR', 'ZERO_SHEAR']])
+
+    y = np.array(trial['Melt_Viscosity']).reshape(-1, 1)
+    trial_shear = np.log10(np.array(trial['Shear_Rate'])).reshape(-1,1)
+    out = {'known':[trial_shear, y], 'data_in':[XX,M,S,T]}
+
+    return out
+
 
 def evaluate_model(Y_test, Y_train, filtered_data, ind):
     test_df = filtered_data.iloc[ind[1],:]

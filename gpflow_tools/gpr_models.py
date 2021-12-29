@@ -29,7 +29,7 @@ def train_GPR(XX, Y_tot, M, S, T):
         opt = gpflow.optimizers.Scipy()
         opt_logs = opt.minimize(m.training_loss, m.trainable_variables, options=dict(maxiter=100))
         mean, var = m.predict_y(xx)
-        error.append(OME(mean, yy))
+        error.append(OME(tf.cast(mean, tf.float32), yy))
         mean_train, var_train = m.predict_y(X)
 
     return models[error.index(min(error))]

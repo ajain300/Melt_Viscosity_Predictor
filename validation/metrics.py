@@ -3,7 +3,9 @@ import tensorflow as tf
 
 
 def OME(y_pred, yy):
-    div = tf.math.divide_no_nan(abs(y_pred),abs(yy))
+    y_pred = tf.math.pow(10.0, y_pred)
+    yy = tf.math.pow(10.0, yy)
+    div = tf.math.divide_no_nan(y_pred,yy)
     l = tf.experimental.numpy.log10(tf.math.reduce_prod(div))
     return tf.math.abs(l)
 
