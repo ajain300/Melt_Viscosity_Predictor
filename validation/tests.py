@@ -63,7 +63,7 @@ def crossval_NN(create_model, XX, yy, M, S, T, gr_Mcr, verbose = 1, random_state
     return m, hist
 
 
-def crossval_compare(NN_models, XX, yy, M, S, T, gr_Mcr , verbose = 1, random_state = None, epochs = 500, gpr_model = None):
+def crossval_compare(NN_models, XX, yy, M, S, T, gr_Mcr,verbose = 1, random_state = None, epochs = 500, gpr_model = None):
     kf = KFold(n_splits=10, shuffle = True, random_state = random_state)
     NN = [[] for i in range(len(NN_models))]
     gpr = []
