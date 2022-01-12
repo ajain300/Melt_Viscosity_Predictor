@@ -3,11 +3,12 @@ import tensorflow as tf
 
 
 def OME(y_pred, yy):
-    y_pred = tf.math.pow(10.0, y_pred)
-    yy = tf.math.pow(10.0, yy)
+    y_pred = tf.cast(tf.math.pow(10.0, y_pred), tf.float32)
+    yy = tf.cast(tf.math.pow(10.0, yy), tf.float32)
     div = tf.math.divide_no_nan(y_pred,yy)
-    l = tf.experimental.numpy.log10(tf.math.reduce_prod(div))
-    return tf.math.abs(l)
+    l = tf.math.abs(tf.experimental.numpy.log10(div))
+    return tf.math.reduce_mean(l)
+#TODO: (1/N).Summation[abs{log(x_pred/x_act)}]
 
 def RMSE(y_pred, yy):
     return np.sqrt(np.sum(np.power((yy-y_pred),2)/len(yy)))

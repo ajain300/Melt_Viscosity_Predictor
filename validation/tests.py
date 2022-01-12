@@ -4,7 +4,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import gpflow
-from validation.metrics import MSE
+from validation.metrics import MSE, OME
 
 def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp,S_scaler=None, T_scaler=None, M_scaler= None):
     """
@@ -63,7 +63,7 @@ def crossval_NN(create_model, XX, yy, M, S, T, gr_Mcr, verbose = 1, random_state
     return m, hist
 
 
-def crossval_compare(NN_models, XX, yy, M, S, T, gr_Mcr,verbose = 1, random_state = None, epochs = 500, gpr_model = None):
+def crossval_compare(NN_models, XX, yy, M, S, T, S_trans, S_scaler, M_scaler, verbose = 1, random_state = None, epochs = 500, gpr_model = None):
     kf = KFold(n_splits=10, shuffle = True, random_state = random_state)
     NN = [[] for i in range(len(NN_models))]
     gpr = []
@@ -75,21 +75,18 @@ def crossval_compare(NN_models, XX, yy, M, S, T, gr_Mcr,verbose = 1, random_stat
         M_train, M_val = M[train_index], M[test_index]
         S_train, S_val = S[train_index], S[test_index]
         T_train, T_val = T[train_index], T[test_index]
-        gr_Mcr_train, gr_Mcr_val = gr_Mcr[train_index], gr_Mcr[test_index]
         n_features = X_train.shape[1]
-        for i in range(len(NN_models)): NN[i].append(NN_models[i](n_features))
-        fit_in = [X_train, M_train, S_train, T_train, gr_Mcr_train]
-        eval_in = [X_val, M_val, S_val, T_val, gr_Mcr_val]
-        for i in range(len(NN_models)): hist[i].append(NN[i][-1].fit(fit_in, y_train, epochs=epochs, batch_size=30, validation_data = (eval_in, y_val) ,verbose=0))
+        for i in range(len(NN_models)): NN[i].append(NN_models[i](n_features)) #S_trans.inverse_transform(S_scaler.inverse_transform(S_train))
+        fit_in = [X_train, M_train, S_train, T_train]
+        eval_in = [X_val, M_val, S_val, T_val]
+        for i in range(len(NN_models)): hist[i].append(NN[i][-1].fit(fit_in, y_train, epochs=epochs, batch_size=20, validation_data = (eval_in, y_val) ,verbose=0))
         if gpr_model:
             X_train_ = np.concatenate((X_train, M_train, S_train, T_train), axis = 1)
             X_test_ = np.concatenate((X_val, M_val, S_val, T_val), axis = 1)
             gpr.append(gpr_model(X_train_, y_train))
             m = gpr[-1]
-            opt = gpflow.optimizers.Scipy()
-            opt_logs = opt.minimize(m.training_loss, m.trainable_variables, options=dict(maxiter=100))
             mean, var = m.predict_y(X_test_)
-            gp_cv.append(MSE(mean, y_val))
+            gp_cv.append(OME(mean, y_val))
         if verbose > 0:
             #print('MSE: %.3f, RMSE: %.3f' % (error[-1], np.sqrt(error[-1])))
             print('Trained fold ' + str(len(hist[-1])) + ' ...')
@@ -234,7 +231,7 @@ def Mw_test(samples_df: pd.DataFrame, samps):
     for c in samples_df.columns:
         if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
             fp_cols.append(c)
-    logMw = pd.Series(np.linspace(1,10,10))
+    logMw = pd.Series(np.linspace(2,6,40))
     for i in samps:
         trial = pd.DataFrame(samples_df.loc[[i]])
         trial.head()
@@ -351,7 +348,7 @@ def shear_test(samples_df: pd.DataFrame, samp):
     for c in samples_df.columns:
         if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
             fp_cols.append(c)
-    log_shear = pd.Series(np.linspace(-3,7,10))
+    log_shear = pd.Series(np.linspace(-3,7,30))
     trial = pd.DataFrame(samples_df.loc[samples_df['SAMPLE_ID'] == samp]).reset_index(drop = True)
     print(trial)
     fp = trial.loc[0, fp_cols + ['SMILES']]
@@ -387,7 +384,7 @@ def evaluate_model(Y_test, Y_train, filtered_data, ind):
     test_std = np.std(test_df['Error'])
     train_std = np.std(train_df['Error'])
 
-    print(test_std)
+    print(train_std)
 
     test_df['BAD_PRED'] = test_std < test_df['Error']
     train_df['BAD_PRED'] = train_std < train_df['Error']
