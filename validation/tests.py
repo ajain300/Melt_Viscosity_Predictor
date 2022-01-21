@@ -1,29 +1,38 @@
 from sklearn.model_selection import KFold
 from random import sample
 import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, learning_curve
 import pandas as pd
 import gpflow
 from validation.metrics import MSE, OME
+import matplotlib.pyplot as plt
+from os import sys
+sys.path.append('../')
+from MODELS.ViscNN import predict_all_cv
 
-def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp,S_scaler=None, T_scaler=None, M_scaler= None):
+def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp):
     """
     Learnng curve test for general NN.
     """
-    tr_sizes = list(np.linspace(0.10, 0.90, 9))
+    tr_sizes = list(np.linspace(0.10, 0.9, 9))
     train_error = []
     test_error = []
     for size in tr_sizes:
+        print('Conducting test for train size ' + str(size))
         XX, X_test, yy, y_test, M, M_test, S, S_test, T, T_test = train_test_split(X_tot, Y_tot, logMw, log_shear, Temp, test_size= 1 - size)
-        model = crossval_NN(create_model, XX, yy, M, S, T, S_scaler= S_scaler, T_scaler=T_scaler,M_scaler= M_scaler)
-        if S_scaler is None:
-            fit_in = [XX, M, S, T]
-            eval_in = [X_test, M_test, S_test, T_test]
-        else:
-            fit_in = [XX, M, S, T, M_scaler.inverse_transform(M), S_scaler.inverse_transform(S), T_scaler.inverse_transform(T)]
-            eval_in = [X_test, M_test, S_test, T_test, M_scaler.inverse_transform(M_test), S_scaler.inverse_transform(S_test), T_scaler.inverse_transform(T_test)]
-        train_error.append(model.evaluate(fit_in, yy, verbose = 0))
-        test_error.append(model.evaluate(eval_in, y_test, verbose = 0))
+        models, _ = crossval_NN(create_model, XX, yy, M, S, T, verbose = 0)
+        fit_in = [XX, M, S, T]
+        eval_in = [X_test, M_test, S_test, T_test]
+        pred_train, _, __ = predict_all_cv(models, fit_in)
+        pred_test, _ , __= predict_all_cv(models, eval_in)
+        train_error.append(OME(pred_train, yy))
+        test_error.append(OME(pred_test, y_test))
+        #train_error.append(model.evaluate(fit_in, yy, verbose = 0))
+        #test_error.append(model.evaluate(eval_in, y_test, verbose = 0))
+
+    plt.plot(tr_sizes, train_error, c = 'orange')
+    plt.plot(tr_sizes, test_error, c= 'blue')
+    plt.legend(['Train','Test'])
 
     return tr_sizes, train_error, test_error
 
@@ -34,7 +43,7 @@ def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp,S_scaler=None, 
     # plt.legend(['Train','Test'])
 
 
-def crossval_NN(create_model, XX, yy, M, S, T, gr_Mcr, verbose = 1, random_state = None, epochs = 500):
+def crossval_NN(create_model, XX, yy, M, S, T, verbose = 1, random_state = None, epochs = 500):
     kf = KFold(n_splits=10, shuffle = True, random_state = random_state)
     m = []
     error = []
@@ -108,6 +117,42 @@ def delete_outlier(model, y_pred, y_test, TH = 12):
 
     return y_pred, y_test, ind
 
+def get_Mw_samples(data:pd.DataFrame):
+    id = 0
+    fp_cols = []
+    for c in data.columns:
+        if 'fp' in c:
+            fp_cols.append(c)
+    data = data.loc[data['Shear_Rate'] == 0 ]
+    temp = data.loc[0, 'Temperature']
+    poly = data.loc[0, 'Polymer']
+    fp = data.loc[0, fp_cols]
+    
+    for i in data.index:
+        if data.loc[i,'Temperature'] == temp and data.loc[i, 'Polymer'] == poly and data.loc[i, fp_cols].equals(fp):
+            data.loc[i,'SAMPLE_ID'] = id
+        else:
+            id += 1
+            data.loc[i, 'SAMPLE_ID'] = id
+
+        temp = data.loc[i, 'Temperature']
+        poly = data.loc[i, 'Polymer']
+        fp = data.loc[i, fp_cols]
+
+    for c in ['Mw', 'Melt_Viscosity']:
+        data[c] = np.log10(data[c])
+    
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
+    print(sample_id)
+
+    for i in sample_id:
+        if len(data.loc[data['SAMPLE_ID'] == i]) <= 3:
+            #print()
+            data = data.drop(data.loc[data['SAMPLE_ID'] == i].index, axis = 0)
+            sample_id.remove(i)
+    return data, sample_id
+
+    
 def Mw_extrapolation(data:pd.DataFrame, n_samples):
     """
     Takes in overall data and extrapolates zero-shear Mw values from samples
@@ -225,61 +270,65 @@ def Mw_extrapolation(data:pd.DataFrame, n_samples):
     out['Shear_Rate'] = 0
     return out, PL_data.reset_index(drop = True), sample_data
 
-def Mw_test(samples_df: pd.DataFrame, samps):
-    out = []
+def Mw_test(samples_df: pd.DataFrame, samp):
     fp_cols = []
     for c in samples_df.columns:
-        if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
+        if 'fp' in c:
             fp_cols.append(c)
     logMw = pd.Series(np.linspace(2,6,40))
-    for i in samps:
-        trial = pd.DataFrame(samples_df.loc[[i]])
-        trial.head()
-        fp = trial[fp_cols + ['SMILES']]
-        tests = pd.DataFrame()
-        tests['logMw'] = logMw
-        tests['Temperature'] = trial['Temperature'].values[0]
-        tests['Shear_Rate'] = trial['Shear_Rate'].values[0]
-        tests['Polymer'] = trial['Polymer'].values[0]
-        tests.loc[[i for i in tests.index], fp_cols + ['SMILES']] = np.array(fp)
+    trial = pd.DataFrame(samples_df.loc[samples_df['SAMPLE_ID'] == samp]).reset_index(drop = True)
+    print(trial)
+    fp = trial.loc[0,fp_cols + ['SMILES']]
+    tests = pd.DataFrame()
+    tests['logMw'] = logMw
+    tests['Temperature'] = trial['Temperature'].values[0]
+    tests['Shear_Rate'] = trial['Shear_Rate'].values[0]
+    tests['Polymer'] = trial['Polymer'].values[0]
+    tests.loc[[i for i in tests.index], fp_cols + ['SMILES']] = np.array(fp)
 
-        if trial['Shear_Rate'].values[0] != 0:
-            tests['Shear_Rate'] = np.log10(test['Shear_Rate'])
-            tests['SHEAR'] = 1
-            tests['ZERO_SHEAR'] = 0
-        else:
-            tests['SHEAR'] = 0
-            tests['ZERO_SHEAR'] = 1
+    if trial['Shear_Rate'].values[0] != 0:
+        tests['Shear_Rate'] = np.log10(test['Shear_Rate'])
+        tests['SHEAR'] = 1
+        tests['ZERO_SHEAR'] = 0
+    else:
+        tests['SHEAR'] = 0
+        tests['ZERO_SHEAR'] = 1
 
-        XX = tests[fp_cols]
-        M = np.array(tests['logMw']).reshape(-1, 1)
-        S = np.array(tests['Shear_Rate']).reshape(-1, 1)
-        T = np.array(tests['Temperature']).reshape(-1, 1)
-        OH_shear = np.array(tests[['SHEAR', 'ZERO_SHEAR']])
+    XX = tests[fp_cols]
+    M = np.array(tests['logMw']).reshape(-1, 1)
+    S = np.array(tests['Shear_Rate']).reshape(-1, 1)
+    T = np.array(tests['Temperature']).reshape(-1, 1)
+    OH_shear = np.array(tests[['SHEAR', 'ZERO_SHEAR']])
 
-        if i == 2:
-            print(trial)
-        if trial['Log_K1'].values[0] != 0:
-            tests.loc[tests['logMw'] <= np.log10(trial['Mcr'].values[0]), 'Melt_Viscosity'] = tests.loc[tests['logMw'] <= np.log10(trial['Mcr'].values[0]), 'logMw'] + trial['Log_K1'].values[0]
-            tests.loc[tests['logMw'] > np.log10(trial['Mcr'].values[0]), 'Melt_Viscosity'] = tests.loc[tests['logMw'] > np.log10(trial['Mcr'].values[0]), 'logMw']*trial['Alpha'].values[0] + trial['Log_K2'].values[0]
-        else:
-            tests['Melt_Viscosity'] = tests['logMw']*trial['Alpha'].values[0] + trial['Log_K2'].values[0]
+    # if trial['Log_K1'].values[0] != 0:
+    #     tests.loc[tests['logMw'] <= np.log10(trial['Mcr'].values[0]), 'Melt_Viscosity'] = tests.loc[tests['logMw'] <= np.log10(trial['Mcr'].values[0]), 'logMw'] + trial['Log_K1'].values[0]
+    #     tests.loc[tests['logMw'] > np.log10(trial['Mcr'].values[0]), 'Melt_Viscosity'] = tests.loc[tests['logMw'] > np.log10(trial['Mcr'].values[0]), 'logMw']*trial['Alpha'].values[0] + trial['Log_K2'].values[0]
+    # else:
+    #     tests['Melt_Viscosity'] = tests['logMw']*trial['Alpha'].values[0] + trial['Log_K2'].values[0]
 
-        y = np.array(tests['Melt_Viscosity']).reshape(-1, 1)
-        out.append({'tests':tests, 'data_in':[XX, OH_shear,M,S,T,y]})
+    Mw_exp = trial['Mw']
+    visc_exp = trial['Melt_Viscosity']
+    out = {'exp': [Mw_exp, visc_exp], 'data_in':[XX, OH_shear,M,S,T], }
 
     return out
 
-def shear_extrapolation(data:pd.DataFrame):
+def get_shear_samples(data:pd.DataFrame):
     """
     Takes in overall data and extrapolates zero-shear Mw values from samples
     """
+    fp_cols = []
+    for c in data.columns:
+        if 'fp' in c:
+            fp_cols.append(c)
     id = 0
-    temp = data.loc[0, 'Temperature']
-    poly = data.loc[0, 'Polymer']
-    weight = data.loc[0, 'Mw']
+    data = data.loc[data['Shear_Rate'] != 0]
+    temp = data.loc[data.index[0], 'Temperature']
+    poly = data.loc[data.index[0], 'Polymer']
+    weight = data.loc[data.index[0], 'Mw']
+    fp = data.loc[data.index[0], fp_cols]
+
     for i in data.index:
-        if data.loc[i, 'Temperature'] == temp and data.loc[i, 'Polymer'] == poly and weight == data.loc[i, 'Mw']:
+        if data.loc[i, 'Temperature'] == temp and data.loc[i, 'Polymer'] == poly and weight == data.loc[i, 'Mw'] and data.loc[i, fp_cols].equals(fp):
             data.loc[i, 'SAMPLE_ID'] = id
         else:
             id += 1
@@ -288,59 +337,18 @@ def shear_extrapolation(data:pd.DataFrame):
         temp = data.loc[i, 'Temperature']
         poly = data.loc[i, 'Polymer']
         weight = data.loc[i, 'Mw']
-
-    fp_cols = []
-    for c in data.columns:
-        if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
-            fp_cols.append(c)
+        fp = data.loc[i, fp_cols]
 
     for c in ['Mw', 'Melt_Viscosity']:
         data[c] = np.log10(data[c])
-
-    shear_samples = []
-
-    #identify the unique sample numbers, create shear_data to hold these samples
-    sample_id = list(data.loc[data['Shear_Rate'] != 0].agg({'SAMPLE_ID': 'unique'})[0])
-
-    #verify that the shear rate is
-    for i in range(len(sample_id)):
-        if np.prod(data.loc[data['SAMPLE_ID'] == sample_id[i], 'Shear_Rate'].to_list()) != 0:
-            shear_samples.append(i)
-
-
-    PL_data = pd.DataFrame(columns = ['SAMPLE_ID', 'Polymer', 'SMILES', 'Temperature', 'Mw', 'Shear_Rate', 'Melt_Viscosity'])
-
-    sample_data = []
+    
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
     for i in sample_id:
-        x = data.loc[data['SAMPLE_ID'] == i, 'Shear_Rate'].to_list()
-        Mw = data.loc[data['SAMPLE_ID'] == i, 'Mw'].to_list()
-        y = data.loc[data['SAMPLE_ID'] == i, 'Melt_Viscosity'].to_list()
-        T =  data.loc[data['SAMPLE_ID'] == i, 'Temperature'].to_list()
-
-        if len(x) < 5: continue
-        if type(x[0]) != float or pd.isnull(x[0]): continue
-
-        ind = np.argsort(x)
-        x = [x[i] for i in ind]
-        y = [y[i] for i in ind]
-        #print(i)
-        sample_data.append([x,y])
-        poly = data.loc[data['SAMPLE_ID'] == i, 'Polymer'].to_list()[0]
-        temp = T[0]
-        weight = Mw[0]
-        p = 2
-        Rel_E = 0
-        log_k_old = 0
-
-        for n in range(len(x)):
-            PL_data = PL_data.append({'SAMPLE_ID' : i, 'Polymer': poly,
-                'SMILES' : data.loc[data['SAMPLE_ID'] == i, 'SMILES'].to_list()[0],
-                'Temperature' : temp, 'Mw': weight, 'Shear_Rate': x[n], 'Melt_Viscosity': y[n]}, ignore_index = True)
-
-    PL_data = PL_data.merge(data[fp_cols + ['SMILES']], on = 'SMILES', how = 'left').drop_duplicates()
-    #PL_data = PL_data.groupby('SAMPLE_ID').max().reset_index()
-
-    return PL_data.reset_index(drop = True)
+        if len(data.loc[data['SAMPLE_ID'] == i]) <= 3:
+            #print()
+            data = data.drop(data.loc[data['SAMPLE_ID'] == i].index, axis = 0)
+            sample_id.remove(i)
+    return data, sample_id
 
 def shear_test(samples_df: pd.DataFrame, samp):
     out = []

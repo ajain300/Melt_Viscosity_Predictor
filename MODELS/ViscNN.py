@@ -76,10 +76,10 @@ def create_ViscNN_concat(n_features):
     log_shear = tf.keras.Input(shape=(1,))
     T = tf.keras.Input(shape=(1,))
     merged = Concatenate(axis=1)([fp_in, logMw, log_shear, T])
-    layer_1 = Dense(180, activation='softplus', kernel_initializer='he_normal')(merged)
-    layer_1 = Dropout(0.1, input_shape = (180,))(layer_1)
-    layer_2 = Dense(150, activation='softplus', kernel_initializer='he_normal')(layer_1)
-    #layer_2 = Dropout(0.2, input_shape = (30,))(layer_2)
+    layer_1 = Dense(210, activation='softplus', kernel_initializer='he_normal')(merged)
+    layer_1 = Dropout(0.1, input_shape = (210,))(layer_1)
+    layer_2 = Dense(90, activation='softplus', kernel_initializer='he_normal')(layer_1)
+    #layer_2 = Dropout(0, input_shape = (210,))(layer_2)
     log_eta = Dense(1, activation = None)(layer_2)
     model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T], outputs=[log_eta])
     model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss=OME)
@@ -93,34 +93,17 @@ def create_ViscNN_concat_HP(hp):
     merged = Concatenate(axis=1)([fp_in, logMw, log_shear, T])
     L1_size = hp.Int('layer_1', 30, 210, step = 30)
     L2_size = hp.Int('layer_2', 30, 210, step = 30)
+    #L3_size = hp.Int('layer_3', 30, 210, step = 30)
     layer_1 = Dense(L1_size, activation='softplus', kernel_initializer='he_normal')(merged)
     layer_1 = Dropout(hp.Float('dropout_1', 0, 0.4, step = 0.1), input_shape = (L1_size,))(layer_1)
     layer_2 = Dense(L2_size, activation='softplus', kernel_initializer='he_normal')(layer_1)
     layer_2 = Dropout(hp.Float('dropout_2', 0, 0.4, step = 0.1), input_shape = (L2_size,))(layer_2)
+    #layer_3 = Dense(L3_size, activation='softplus', kernel_initializer='he_normal')(layer_2)
+    #layer_3 = Dropout(hp.Float('dropout_3', 0, 0.4, step = 0.1), input_shape = (L3_size,))(layer_3)
     log_eta = Dense(1, activation = None)(layer_2)
     model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T], outputs=[log_eta])
     model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss='mse')
     return model
-
-def create_ViscNN_comb(n_features):
-    fp_in = tf.keras.Input(shape=(n_features,))
-    logMw_norm = tf.keras.Input(shape=(1,))
-    log_shear_norm = tf.keras.Input(shape=(1,))
-    T_norm = tf.keras.Input(shape=(1,))
-    logMw = tf.keras.Input(shape=(1,))
-    log_shear = tf.keras.Input(shape=(1,))
-    T = tf.keras.Input(shape=(1,))
-    merged = Concatenate(axis=1)([fp_in, logMw_norm, log_shear_norm, T_norm])
-    layer_1 = Dense(128, activation='relu', kernel_initializer='he_normal')(merged)
-    layer_2 = Dense(32, activation='relu', kernel_initializer='he_normal')(layer_1)
-    params_layer = Dense(5, activation= None)(layer_2)
-    A,a,B,To,n = tf.keras.layers.Lambda(lambda x: tf.split(x,[1,1,1,1,1],axis=-1))(params_layer)
-    eta = tf.keras.layers.Lambda(lambda x: x[0] + x[1]*x[5] + x[4]*x[6] + (x[2]/(x[7] - x[3])))([A,a,B,To,n, logMw_norm, log_shear_norm, T_norm])
-    model=tf.keras.models.Model(inputs=[fp_in, logMw_norm, log_shear_norm, T_norm, logMw, log_shear, T], outputs=[eta])
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss=OME_loss)
-    return model
-
-
 
 def create_ViscNN_phys(n_features):
     fp_in = tf.keras.Input(shape=(n_features,))
@@ -128,10 +111,10 @@ def create_ViscNN_phys(n_features):
     T_norm = tf.keras.Input(shape=(1,))
     shear = tf.keras.Input(shape=(1,))
     merged = Concatenate(axis=1)([fp_in, T_norm])
-    layer_1 = Dense(128, activation='softplus', kernel_initializer='he_normal')(merged)
-    layer_1 = Dropout(0.3, input_shape = (128,))(layer_1)
-    layer_2 = Dense(30, activation='softplus', kernel_initializer='he_normal')(layer_1)
-    #layer_2 = Dropout(0.2, input_shape = (30,))(layer_2)
+    layer_1 = Dense(120, activation='softplus', kernel_initializer='he_normal')(merged)
+    layer_1 = Dropout(0.1, input_shape = (120,))(layer_1)
+    layer_2 = Dense(150, activation='softplus', kernel_initializer='he_normal')(layer_1)
+    layer_2 = Dropout(0.2, input_shape = (150,))(layer_2)
     log_k = Dense(1, activation= None, name= 'log_k_1')(layer_2)
     #log_k = Dense(1, activation= None, name= 'log_k')(Concatenate(axis=1)([log_k, ab]))
     tau = Dense(1, activation= 'softplus', name= 'tau')(layer_2)
@@ -161,4 +144,4 @@ def predict_all_cv(models, X_in, remove_model = None):
     pred = np.array(pred)
     std = np.std(pred, axis = 0)
     means = np.mean(pred, axis = 0)
-    return [m[0] for m in means], [s[0] for s in std]
+    return [m[0] for m in means], [s[0] for s in std], pred
