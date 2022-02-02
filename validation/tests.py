@@ -3,7 +3,6 @@ from random import sample
 import numpy as np
 from sklearn.model_selection import train_test_split, learning_curve
 import pandas as pd
-import gpflow
 from validation.metrics import MSE, OME
 import matplotlib.pyplot as plt
 from os import sys
@@ -20,13 +19,15 @@ def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp):
     for size in tr_sizes:
         print('Conducting test for train size ' + str(size))
         XX, X_test, yy, y_test, M, M_test, S, S_test, T, T_test = train_test_split(X_tot, Y_tot, logMw, log_shear, Temp, test_size= 1 - size)
-        models, _ = crossval_NN(create_model, XX, yy, M, S, T, verbose = 0)
+        models, _ = crossval_NN(create_model, XX, yy, M, S, T, verbose = 0) 
         fit_in = [XX, M, S, T]
         eval_in = [X_test, M_test, S_test, T_test]
         pred_train, _, __ = predict_all_cv(models, fit_in)
         pred_test, _ , __= predict_all_cv(models, eval_in)
         train_error.append(OME(pred_train, yy))
         test_error.append(OME(pred_test, y_test))
+        print('Train_error  = ' + str(train_error[-1]))
+        print('Test_error  = ' + str(test_error[-1]))
         #train_error.append(model.evaluate(fit_in, yy, verbose = 0))
         #test_error.append(model.evaluate(eval_in, y_test, verbose = 0))
 
@@ -46,7 +47,6 @@ def viscNN_LC(create_model, X_tot, Y_tot, logMw, log_shear, Temp):
 def crossval_NN(create_model, XX, yy, M, S, T, verbose = 1, random_state = None, epochs = 500):
     kf = KFold(n_splits=10, shuffle = True, random_state = random_state)
     m = []
-    error = []
     hist = []
     for train_index, test_index in kf.split(XX):
         X_train, X_val = XX[train_index], XX[test_index]
@@ -56,12 +56,8 @@ def crossval_NN(create_model, XX, yy, M, S, T, verbose = 1, random_state = None,
         T_train, T_val = T[train_index], T[test_index]
         n_features = X_train.shape[1]
         m.append(create_model(n_features))
-        if create_model.__name__ == 'create_ViscNN_concat':
-            fit_in = [X_train, M_train, S_train, T_train]
-            eval_in = [X_val, M_val, S_val, T_val]
-        elif create_model.__name__ == 'create_ViscNN_phys':
-            fit_in = [X_train, M_train, S_train, T_train]
-            eval_in = [X_val, M_val, S_val, T_val]
+        fit_in = [X_train, M_train, S_train, T_train]
+        eval_in = [X_val, M_val, S_val, T_val]
         hist.append(m[-1].fit(fit_in, y_train, epochs=epochs, batch_size=30, validation_data = (eval_in, y_val) ,verbose=0))
         if verbose > 0:
             #print('MSE: %.3f, RMSE: %.3f' % (error[-1], np.sqrt(error[-1])))
@@ -142,7 +138,7 @@ def get_Mw_samples(data:pd.DataFrame):
     for c in ['Mw', 'Melt_Viscosity']:
         data[c] = np.log10(data[c])
     
-    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'}))
     print(sample_id)
 
     for i in sample_id:
@@ -342,7 +338,7 @@ def get_shear_samples(data:pd.DataFrame):
     for c in ['Mw', 'Melt_Viscosity']:
         data[c] = np.log10(data[c])
     
-    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'}))
     for i in sample_id:
         if len(data.loc[data['SAMPLE_ID'] == i]) <= 3:
             #print()
