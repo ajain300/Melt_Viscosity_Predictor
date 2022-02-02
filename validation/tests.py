@@ -317,11 +317,11 @@ def get_shear_samples(data:pd.DataFrame):
         if 'fp' in c:
             fp_cols.append(c)
     id = 0
-    data = data.loc[data['Shear_Rate'] != 0]
     temp = data.loc[data.index[0], 'Temperature']
     poly = data.loc[data.index[0], 'Polymer']
     weight = data.loc[data.index[0], 'Mw']
     fp = data.loc[data.index[0], fp_cols]
+
 
     for i in data.index:
         if data.loc[i, 'Temperature'] == temp and data.loc[i, 'Polymer'] == poly and weight == data.loc[i, 'Mw'] and data.loc[i, fp_cols].equals(fp):
@@ -329,16 +329,19 @@ def get_shear_samples(data:pd.DataFrame):
         else:
             id += 1
             data.loc[i, 'SAMPLE_ID'] = id
-
         temp = data.loc[i, 'Temperature']
         poly = data.loc[i, 'Polymer']
         weight = data.loc[i, 'Mw']
         fp = data.loc[i, fp_cols]
 
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'}))
+    for samp in sample_id:
+        if sum(data['SAMPLE_ID']) == 0:
+
     for c in ['Mw', 'Melt_Viscosity']:
         data[c] = np.log10(data[c])
     
-    sample_id = list(data.agg({'SAMPLE_ID': 'unique'}))
+    
     for i in sample_id:
         if len(data.loc[data['SAMPLE_ID'] == i]) <= 3:
             #print()
