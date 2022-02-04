@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 
 
-def OME(y_pred, yy):
+def OME(yy, y_pred):
     y_pred = tf.cast(tf.math.pow(10.0, y_pred), tf.float32)
     yy = tf.cast(tf.math.pow(10.0, yy), tf.float32)
     div = tf.math.divide_no_nan(y_pred,yy)

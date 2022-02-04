@@ -138,10 +138,11 @@ def get_Mw_samples(data:pd.DataFrame):
     for c in ['Mw', 'Melt_Viscosity']:
         data[c] = np.log10(data[c])
     
-    sample_id = list(data.agg({'SAMPLE_ID': 'unique'}))
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
     print(sample_id)
 
     for i in sample_id:
+        
         if len(data.loc[data['SAMPLE_ID'] == i]) <= 3:
             #print()
             data = data.drop(data.loc[data['SAMPLE_ID'] == i].index, axis = 0)
@@ -334,24 +335,27 @@ def get_shear_samples(data:pd.DataFrame):
         weight = data.loc[i, 'Mw']
         fp = data.loc[i, fp_cols]
 
-    sample_id = list(data.agg({'SAMPLE_ID': 'unique'}))
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
     for samp in sample_id:
-        if sum(data['SAMPLE_ID']) == 0:
+        if sum(data.loc[data['SAMPLE_ID'] == samp, 'Shear_Rate']) == 0:
+            data = data.drop(data.loc[data['SAMPLE_ID'] == samp].index, axis = 0)
 
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
     for c in ['Mw', 'Melt_Viscosity']:
         data[c] = np.log10(data[c])
     
-    
     for i in sample_id:
         if len(data.loc[data['SAMPLE_ID'] == i]) <= 3:
-            #print()
+            print(len(data.loc[data['SAMPLE_ID'] == i]))
             data = data.drop(data.loc[data['SAMPLE_ID'] == i].index, axis = 0)
-            sample_id.remove(i)
+    sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
     return data, sample_id
+
 
 def shear_test(samples_df: pd.DataFrame, samp):
     out = []
     fp_cols = []
+    samples_df = samples_df.loc[samples_df['Shear_Rate'] != 0]
     for c in samples_df.columns:
         if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
             fp_cols.append(c)
@@ -377,6 +381,37 @@ def shear_test(samples_df: pd.DataFrame, samp):
     out = {'known':[trial_shear, y], 'data_in':[XX,M,S,T]}
 
     return out
+
+def small_shear_test(samples_df: pd.DataFrame, samp):
+    out = []
+    fp_cols = []
+    
+    for c in samples_df.columns:
+        if 'afp' in c or 'bfp' in c or 'mfp' in c or 'efp' in c:
+            fp_cols.append(c)
+    log_shear = np.linspace(-4,0,10)
+    shear = pd.Series(np.insert(np.power(10, log_shear), 0, 0))
+    trial = pd.DataFrame(samples_df.loc[samples_df['SAMPLE_ID'] == samp]).reset_index(drop = True)
+    fp = trial.loc[0, fp_cols + ['SMILES']]
+    tests = pd.DataFrame()
+    tests['Shear_Rate'] = shear
+    tests['logMw'] = trial.loc[0,'Mw']
+    tests['Temperature'] = trial.loc[0,'Temperature']
+    tests.loc[[i for i in tests.index], fp_cols + ['SMILES']] = np.array(fp)
+
+
+    XX = tests[fp_cols]
+    M = np.array(tests['logMw']).reshape(-1, 1)
+    S = np.array(tests['Shear_Rate']).reshape(-1, 1)
+    T = np.array(tests['Temperature']).reshape(-1, 1)
+    #OH_shear = np.array(tests[['SHEAR', 'ZERO_SHEAR']])
+
+    y = np.array(trial['Melt_Viscosity']).reshape(-1, 1)
+    trial_shear = np.array(trial['Shear_Rate']).reshape(-1,1)
+    out = {'known':[trial_shear, y], 'data_in':[XX,M,S,T]}
+
+    return out
+
 
 
 def evaluate_model(Y_test, Y_train, filtered_data, ind):
