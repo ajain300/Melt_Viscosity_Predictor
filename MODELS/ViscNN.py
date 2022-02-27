@@ -49,13 +49,6 @@ def log10(x):
     denominator = K.log(tf.constant(10, dtype=numerator.dtype))
     return numerator / denominator
 
-def OME_loss(yy, y_pred):
-    y_pred = tf.math.pow(10.0, y_pred)
-    yy = tf.math.pow(10.0, yy)
-    div = tf.math.divide_no_nan(y_pred,yy)
-    l = tf.math.reduce_prod(div) - 1
-    return tf.math.abs(l)
-
 def create_ViscNN(n_features = 158):
     fp_in = tf.keras.Input(shape=(n_features,))
     logMw = tf.keras.Input(shape=(1,))
