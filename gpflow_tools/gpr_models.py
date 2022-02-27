@@ -10,7 +10,7 @@ sys.path.append('../')
 from Melt_Viscosity_Predictor.validation.metrics import OME, MSE
 
 def create_GPR(X, Y):
-    k = gpflow.kernels.Matern52()
+    k = gpflow.kernels.SquaredExponential()
     m = gpflow.models.GPR(data=(X, Y), kernel=k, mean_function=None)
     opt = gpflow.optimizers.Scipy()
     opt_logs = opt.minimize(m.training_loss, m.trainable_variables, options=dict(maxiter=100))
