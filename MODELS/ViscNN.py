@@ -1,5 +1,6 @@
 import tensorflow as tf
 import tensorflow.keras as keras
+from tensorflow.keras import regularizers
 from tensorflow.keras.layers import Dense, Concatenate, Lambda, Dropout, Activation, GaussianNoise
 import pandas as pd
 import numpy as np
@@ -26,7 +27,8 @@ class ViscNN_concat_HP(kt.HyperModel):
         logMw = tf.keras.Input(shape=(1,))
         log_shear = tf.keras.Input(shape=(1,))
         T = tf.keras.Input(shape=(1,))
-        merged = Concatenate(axis=1)([fp_in, logMw, log_shear, T])
+        P = tf.keras.Input(shape=(1,))
+        merged = Concatenate(axis=1)([fp_in, logMw, log_shear, T, P])
         L1_size = hp.Int('layer_1', 30, 150, step = 30)
         L2_size = hp.Int('layer_2', 30, 150, step = 30)
         #L3_size = hp.Int('layer_3', 30, 210, step = 30)
@@ -37,25 +39,10 @@ class ViscNN_concat_HP(kt.HyperModel):
         #layer_3 = Dense(L3_size, activation='softplus', kernel_initializer='he_normal')(layer_2)
         #layer_3 = Dropout(hp.Float('dropout_3', 0, 0.4, step = 0.1), input_shape = (L3_size,))(layer_3)
         log_eta = Dense(1, activation = None)(layer_2)
-        model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T], outputs=[log_eta])
+        model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T, P], outputs=[log_eta])
         model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss='mse')
         return model
 
-def Mcr_gpr_train(OG_fp, pca, M_scaler, scaler, transform = True):
-    me_data = pd.read_excel('Data/EntanglementMW_fp.xlsx')
-    fp = me_data[[c for c in me_data.columns if 'fp' in c]]
-    fp[[c for c in OG_fp if c not in fp]] = 0
-    fp = fp.drop(columns = [c for c in fp if c not in OG_fp])
-    y = M_scaler.transform(np.log10(np.array(me_data['Me']*2)).reshape(-1,1))
-    X_me = scaler.transform((pca.transform(fp[OG_fp]))) if transform else  scaler.transform(fp[OG_fp])
-    gpr_Mcr, cv_error = train_GPR(X_me, y, LOO = True)
-    pred, var = gpr_Mcr.predict_y(X_me)
-    plt.plot(np.linspace((min(y)[0]), (max(y)[0]), num = 2),np.linspace((min(y)[0]), (max(y)[0]), num = 2),'k-')
-    plt.ylabel('Scaled Mw Prediction')
-    plt.xlabel('Scaled Mw Truth')
-    plt.title('Mcr Prediction')
-    plt.scatter(y,pred, c = 'orange')
-    return gpr_Mcr, cv_error
 
 def alpha_sig(x):
     return tf.keras.activations.sigmoid(x)*0.4 +3.2
@@ -96,13 +83,14 @@ def create_ViscNN_concat(n_features, hp):
     shear_noise = GaussianNoise(0.02)(log_shear)
     T = tf.keras.Input(shape=(1,))
     T_noise = GaussianNoise(0.02)(T)
-    merged = Concatenate(axis=1)([fp_in, logMw_noise, shear_noise, T_noise])
+    P = tf.keras.Input(shape=(1,))
+    merged = Concatenate(axis=1)([fp_in, logMw_noise, shear_noise, T_noise, P])
     layer_1 = Dense(hp['layer_1'], activation='softplus', kernel_initializer='he_normal')(merged)
     layer_1 = Dropout(hp['dropout_1'], input_shape = (hp['layer_1'],))(layer_1)
     layer_2 = Dense(hp['layer_2'], activation='softplus', kernel_initializer='he_normal')(layer_1)
     layer_2 = Dropout(hp['dropout_2'], input_shape = (hp['layer_2'],))(layer_2)
     log_eta = Dense(1, activation = 'softplus')(layer_2)
-    model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T], outputs=[log_eta])
+    model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T, P], outputs=[log_eta])
     model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss='mse')
     return model
 
@@ -189,7 +177,6 @@ def predict_all_cv(models, X_in, remove_model = None):
     pred = np.array(pred)
     std = np.std(pred, axis = 0)
     means = np.nanmean(pred, axis = 0)
-
     return [m[0] for m in means], [s[0] for s in std], pred
 
 def load_models(date, data_type, NN_models = [create_ViscNN_concat, create_ViscNN_phys]):
