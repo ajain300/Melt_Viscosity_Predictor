@@ -1,0 +1,1 @@
+{"layer_1": 120, "layer_2": 60, "dropout_1": 0.05, "dropout_2": 0.05, "tuner/epochs": 20, "tuner/initial_epoch": 7, "tuner/bracket": 2, "tuner/round": 2, "tuner/trial_id": "6a60654472793700b0f63513b21f0a3b"}
