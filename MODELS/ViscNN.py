@@ -1,7 +1,8 @@
 import tensorflow as tf
 import tensorflow.keras as keras
-from tensorflow.keras import regularizers
 from tensorflow.keras.layers import Dense, Concatenate, Lambda, Dropout, Activation, GaussianNoise
+from  keras import activations
+from keras.regularizers import l2
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -9,6 +10,7 @@ import keras.backend as K
 import kerastuner as kt
 import sys
 import matplotlib.pyplot as plt
+import torch
 sys.path.append('../')
 from Melt_Viscosity_Predictor.gpflow_tools.gpr_models import train_GPR
 from Melt_Viscosity_Predictor.validation.metrics import OME
@@ -28,17 +30,21 @@ class ViscNN_concat_HP(kt.HyperModel):
         log_shear = tf.keras.Input(shape=(1,))
         T = tf.keras.Input(shape=(1,))
         P = tf.keras.Input(shape=(1,))
-        merged = Concatenate(axis=1)([fp_in, logMw, log_shear, T, P])
+        fp_size = hp.Int('fp_dense', 30, 150, step = 30)
+        fp_dense = Dense(fp_size, activation = 'softplus', kernel_initializer='he_normal')(fp_in)
+        merged = Concatenate(axis=1)([fp_dense, logMw, log_shear, T, P])
         L1_size = hp.Int('layer_1', 30, 150, step = 30)
         L2_size = hp.Int('layer_2', 30, 150, step = 30)
+        L1_reg = hp.Float('l1_reg', 0.000, 0.0001, step = 0.00001)
+        L2_reg = hp.Float('l2_reg', 0.000, 0.0001, step = 0.00001)
         #L3_size = hp.Int('layer_3', 30, 210, step = 30)
-        layer_1 = Dense(L1_size, activation='softplus', kernel_initializer='he_normal')(merged)
-        layer_1 = Dropout(hp.Float('dropout_1', 0, 0.5, step = 0.05), input_shape = (L1_size,))(layer_1)
-        layer_2 = Dense(L2_size, activation='softplus', kernel_initializer='he_normal')(layer_1)
-        layer_2 = Dropout(hp.Float('dropout_2', 0, 0.5, step = 0.05), input_shape = (L2_size,))(layer_2)
+        layer_1 = Dense(L1_size, activation='softplus', kernel_initializer='he_normal', kernel_regularizer = l2(L1_reg))(merged)
+        layer_1 = Dropout(hp.Float('dropout_1', 0.1, 0.5, step = 0.05), input_shape = (L1_size,))(layer_1)
+        layer_2 = Dense(L2_size, activation='softplus', kernel_initializer='he_normal', kernel_regularizer = l2(L2_reg))(layer_1)
+        layer_2 = Dropout(hp.Float('dropout_2', 0.1, 0.5, step = 0.05), input_shape = (L2_size,))(layer_2)
         #layer_3 = Dense(L3_size, activation='softplus', kernel_initializer='he_normal')(layer_2)
         #layer_3 = Dropout(hp.Float('dropout_3', 0, 0.4, step = 0.1), input_shape = (L3_size,))(layer_3)
-        log_eta = Dense(1, activation = None)(layer_2)
+        log_eta = Dense(1, activation = activations.tanh)(layer_2)
         model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T, P], outputs=[log_eta])
         model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss='mse')
         return model
@@ -84,118 +90,107 @@ def create_ViscNN_concat(n_features, hp):
     T = tf.keras.Input(shape=(1,))
     T_noise = GaussianNoise(0.02)(T)
     P = tf.keras.Input(shape=(1,))
-    merged = Concatenate(axis=1)([fp_in, logMw_noise, shear_noise, T_noise, P])
-    layer_1 = Dense(hp['layer_1'], activation='softplus', kernel_initializer='he_normal')(merged)
-    layer_1 = Dropout(hp['dropout_1'], input_shape = (hp['layer_1'],))(layer_1)
-    layer_2 = Dense(hp['layer_2'], activation='softplus', kernel_initializer='he_normal')(layer_1)
-    layer_2 = Dropout(hp['dropout_2'], input_shape = (hp['layer_2'],))(layer_2)
-    log_eta = Dense(1, activation = 'softplus')(layer_2)
+    fp_dense = Dense(hp['fp_dense'], activation = 'softplus', kernel_initializer='he_normal')(fp_in)
+    merged = Concatenate(axis=1)([fp_dense, logMw_noise, shear_noise, T_noise, P])
+    layer_1 = Dense(hp['layer_1'], activation='softplus', kernel_initializer='he_normal', kernel_regularizer = l2(hp['l1_reg']))(merged)
+    layer_1 = Dropout(hp['dropout_1'], input_shape = (hp['layer_1'],))(layer_1, training = True)
+    layer_2 = Dense(hp['layer_2'], activation='softplus', kernel_initializer='he_normal', kernel_regularizer = l2(hp['l2_reg']))(layer_1)
+    layer_2 = Dropout(hp['dropout_2'], input_shape = (hp['layer_2'],))(layer_2, training = True)
+    log_eta = Dense(1, activation = activations.tanh)(layer_2)
     model=tf.keras.models.Model(inputs=[fp_in, logMw, log_shear, T, P], outputs=[log_eta])
     model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss='mse')
     return model
+  
 
-def create_ViscNN_phys_HP(hp):
-    fp_in = tf.keras.Input(shape=(217,))
-    logMw_norm = tf.keras.Input(shape=(1,))
-    T_norm = tf.keras.Input(shape=(1,))
-    shear = tf.keras.Input(shape=(1,))
-    merged = Concatenate(axis=1)([fp_in, T_norm])
-    L1_size = hp.Int('layer_1', 30, 210, step = 30)
-    L2_size = hp.Int('layer_2', 30, 210, step = 30)
-    #L3_size = hp.Int('layer_3', 30, 210, step = 30)
-    layer_1 = Dense(L1_size, activation='softplus', kernel_initializer='he_normal')(merged)
-    layer_1 = Dropout(hp.Float('dropout_1', 0, 0.4, step = 0.1), input_shape = (L1_size,))(layer_1)
-    layer_2 = Dense(L2_size, activation='softplus', kernel_initializer='he_normal')(layer_1)
-    layer_2 = Dropout(hp.Float('dropout_2', 0, 0.4, step = 0.1), input_shape = (L2_size,))(layer_2)
-    log_k_1 = Dense(1, activation= None, name= 'log_k_1')(layer_2)
-    log_k_2 = Dense(1, activation = 'softplus' , name = 'log_k_2')(layer_2)
-    #log_k = Dense(1, activation= None, name= 'log_k')(Concatenate(axis=1)([log_k, ab]))
-    tau = Dense(1, activation= 'softplus', name= 'tau')(layer_2)
-    alpha_1 = Dense(1, activation = 'softplus' , name = 'alpha_1')(layer_2)
-    alpha_2 = Dense(1, activation = 'softplus' , name = 'alpha_2')(layer_2)
-    Mcr_calc = hp.Choice('Mcr_calc', [1,2,3])
-    opt = {1: fp_in, 2: layer_1, 3:layer_2}
-    Mcr = Dense(1, activation = 'softplus' , name = 'Mcr')(opt[Mcr_calc])
-    decision_layer = Concatenate(axis=1)([alpha_1, alpha_2, log_k_1, log_k_2, Mcr, logMw_norm])
-    dec_layer = hp.Int('dec_layer', 2, 6, step = 1)
-    decision_layer = Dense(dec_layer, activation = 'softplus' , name = 'dec_layer')(decision_layer)
-    alpha = Dense(1, activation = 'softplus' , name = 'alpha')(decision_layer)
-    log_k = Dense(1, activation = 'softplus' , name = 'log_k')(decision_layer)
-    n = Dense(1, activation = 'softplus', name = 'n')(layer_2)
-    #n_sc = Dense(1, activation = None, name = 'n_scale')(n)
-    zero_shear_visc = Lambda(lambda x: x[0] + (x[2]*(x[1])),name = 'zero_shear_visc') ([log_k,alpha,logMw_norm])
-    crit_shear = Dense(1, activation = 'softplus' , name = 'crit_shear')(Concatenate(axis=1)([zero_shear_visc, tau]))
-    #crit_shear_sc = Dense(1, activation = crit_sig)(crit_shear)
-    log_eta = Lambda(lambda x: x[0] - (x[1])*log10(1 + (x[3]/x[2]))) ([zero_shear_visc, n, crit_shear, shear]) #x[0] - (x[1])*log10(1 + (((10**x[0])*x[3])/x[2]))
-    model = tf.keras.models.Model(inputs=[fp_in, logMw_norm, shear, T_norm], outputs=[log_eta])
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss=OME)
-    return model
-
-
-def create_ViscNN_phys(n_features):
-    fp_in = tf.keras.Input(shape=(n_features,))
-    logMw_norm = tf.keras.Input(shape=(1,))
-    T_norm = tf.keras.Input(shape=(1,))
-    shear = tf.keras.Input(shape=(1,))
-    merged = Concatenate(axis=1)([fp_in, T_norm])
-    layer_1 = Dense(150, activation='softplus', kernel_initializer='he_normal')(merged)
-    layer_1 = Dropout(0.1, input_shape = (210,))(layer_1)
-    layer_2 = Dense(90, activation='softplus', kernel_initializer='he_normal')(layer_1)
-    layer_2 = Dropout(0.1, input_shape = (90,))(layer_2)
-    log_k_1 = Dense(1, activation= None, name= 'log_k_1')(layer_2)
-    log_k_2 = Dense(1, activation = 'softplus' , name = 'log_k_2')(layer_2)
-    #log_k = Dense(1, activation= None, name= 'log_k')(Concatenate(axis=1)([log_k, ab]))
-    tau = Dense(1, activation= 'softplus', name= 'tau')(layer_2)
-    Mcr = Dense(1, activation = 'softplus' , name = 'Mcr')(fp_in)
-    alpha_1 = Dense(1, activation = 'softplus' , name = 'alpha_1')(layer_2)
-    alpha_2 = Dense(1, activation = 'softplus' , name = 'alpha_2')(layer_2)
-    above_Mcr =  Lambda(lambda x: 10*(x[0] - x[1]))([logMw_norm, Mcr])
-    above_Mcr = Activation('sigmoid')(above_Mcr)
-    decision_layer = Concatenate(axis=1)([alpha_1, alpha_2, log_k_1, log_k_2, above_Mcr])
-    decision_layer = Dense(5, activation = 'softplus' , name = 'dec_layer')(decision_layer)
-    alpha = Dense(1, activation = 'softplus' , name = 'alpha')(decision_layer)
-    log_k = Dense(1, activation = 'softplus' , name = 'log_k')(decision_layer)
-    n = Dense(1, activation = 'softplus', name = 'n')(layer_2)
-    #n_sc = Dense(1, activation = None, name = 'n_scale')(n)
-    zero_shear_visc = Lambda(lambda x: x[0] + (x[2]*(x[1])),name = 'zero_shear_visc') ([log_k,alpha,logMw_norm])
-    crit_shear = Dense(1, activation = 'softplus' , name = 'crit_shear')(Concatenate(axis=1)([zero_shear_visc, tau]))
-    #crit_shear_sc = Dense(1, activation = crit_sig)(crit_shear)
-    log_eta = Lambda(lambda x: x[0] - (x[1])*log10(1 + (x[3]/x[2]))) ([zero_shear_visc, n, crit_shear, shear]) #x[0] - (x[1])*log10(1 + (((10**x[0])*x[3])/x[2]))
-    model = tf.keras.models.Model(inputs=[fp_in, logMw_norm, shear, T_norm], outputs=[log_eta])
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate= 0.001), loss='mse')
-    return model
-
-def predict_all_cv(models, X_in, remove_model = None):
+def predict_all_cv(models, X_in, remove_model = None, is_torch = False, get_constants = False):
     """
     Gets mean and variance of predictions from all CV folds.
     """
-    if remove_model:
-        for r in remove_model: model_nums.pop(r)
-    pred = []
-    for m in models:
-        pred += [m.predict(X_in)]
+
+    if not is_torch:
+        # if remove_model:
+        #     for r in remove_model: model_nums.pop(r)
+        pred = []
+        
+        for m in models:
+            #for layer in m.layers:
+                #if isinstance(layer, tf.keras.layers.Dropout) and hasattr(layer, 'training'):
+                 #   layer.training = True
+            pred += [m(X_in, training = True)]
+    else:
+        X = [torch.tensor(x).to(models[0].device).float() for x in X_in]
+        pred = []
+        const_list = ['a1', 'a2', 'Mcr', 'kcr', 'c1', 'c2', 'Tr','tau', 'n', 'eta_0']
+        constants = {k:[] for k in const_list}
+        for m in models:
+            for mod in m.modules():
+                    if mod.__class__.__name__.startswith('Dropout'):
+                        mod.train()
+            if get_constants:
+                y_pred, *const_out = m(*X, get_constants = True)
+                y_pred = y_pred.cpu().detach().numpy()
+                for k,i in zip(constants, range(len(const_out))):
+                    constants[k] += [const_out[i].cpu().detach().numpy()]
+            else:
+                y_pred = m(*X).cpu().detach().numpy()
+            
+            #print('FOLD PREDICTION', y_pred)
+            if not np.any(y_pred < -3):
+                pred += [y_pred]
+    
     pred = np.array(pred)
     std = np.std(pred, axis = 0)
     means = np.nanmean(pred, axis = 0)
-    return [m[0] for m in means], [s[0] for s in std], pred
+    if get_constants:
+        for k in constants:
+            constants[k] = np.array(constants[k])
+            constants[k] = np.nanmean(constants[k], axis = 0)
+    try:
+        if not get_constants:
+            return [m[0] for m in means], [s[0] for s in std], pred
+        else:
+            return constants
+    except:
+        print(means)
+        print(type(means))
+        print('Error in prediction')
 
-def load_models(date, data_type, NN_models = [create_ViscNN_concat, create_ViscNN_phys]):
+def load_models(date, data_type, NN_models = [create_ViscNN_concat]):
     NN = [[],[]]
+    HypNet = []
     gpr = []
     history = [[],[]]
     for i in range(len(NN_models)):
+        
         for n in range(10):
-            NN[i].append(keras.models.load_model(f'MODELS/{date}_{data_type}/{NN_models[i].__name__}/model_{n}'))
-            history[i].append(history_obj(np.load(f'MODELS/{date}_{data_type}/{NN_models[i].__name__}/hist_{n}.npy', allow_pickle=True).item()))
+            try:
+                NN[i].append(keras.models.load_model(f'MODELS/{date}_{data_type}/{NN_models[i].__name__}/model_{n}'))
+                history[i].append(history_obj(np.load(f'MODELS/{date}_{data_type}/{NN_models[i].__name__}/hist_{n}.npy', allow_pickle=True).item()))
+            except FileNotFoundError:
+                print(f'Could not find ANN files for {date}_{data_type} {i}...')
+                continue
         NN_cv = np.load(f'MODELS/{date}_{data_type}/{NN_models[i].__name__}/OME_CV.npy')
+            
+    
+    
+        for i in range(10):
+            try:
+                gpr.append(tf.saved_model.load(f'MODELS/{date}_{data_type}/GPR/model_{i}'))
+            except FileNotFoundError:
+                print(f'Could not find GPR files for {date}_{data_type} {i}...')
+                continue
+
+        gp_cv = np.load(f'MODELS/{date}_{data_type}/GPR/OME_CV.npy')
+
     for i in range(10):
-        gpr.append(tf.saved_model.load(f'MODELS/{date}_{data_type}/GPR/model_{i}'))
-    gp_cv = np.load(f'MODELS/{date}_{data_type}/GPR/OME_CV.npy')
-    return NN, history, gpr, gp_cv, NN_cv
+        HypNet.append(torch.load(f'MODELS/{date}_{data_type}/PNN/model_{i}.pt'))
+    HypNet_cv = np.load(f'MODELS/{date}_{data_type}/PNN/OME_CV.npy')
+
+    return NN, history, gpr, gp_cv, NN_cv, HypNet, HypNet_cv
 
             
 class metalearner(tf.keras.Model):
-    def __init__(CV_models):
+    def __init__(self, CV_models):
         self.models
 
     def build():

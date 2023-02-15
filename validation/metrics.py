@@ -24,7 +24,8 @@ def MAPE(y_pred, yy):
 def get_CV_error(history, scaler = None):
     cv_error = []
     print(type(history[0]))
-    if isinstance(history[0], (np.floating, float)):
+    if not hasattr(history[0], 'history'):
+        print(history)
         return np.mean(history)*(scaler.data_max_ - scaler.data_min_)[0]
     else: 
         for hist in history:
