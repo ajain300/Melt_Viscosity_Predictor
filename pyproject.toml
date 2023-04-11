@@ -1,0 +1,34 @@
+[tool.poetry]
+name = "melt_viscosity_predictor"
+version = "0.1.0"
+description = ""
+authors = ["ajain300"]
+
+[tool.poetry.dependencies]
+python = ">=3.8,<3.11"
+jupyterlab = "^3.2.9"
+openpyxl = "^3.0.9"
+PyYAML = "^6.0"
+scipy = "^1.8.0"
+ipykernel = "^6.13.0"
+torch = "^1.11.0"
+ray = "^1.12.1"
+GPUtil = "^1.4.0"
+tensorflow-text = "^2.11.0"
+mpl-scatter-density = "^0.7"
+pytest = "^7.2.2"
+pgfingerprinting = {git = "ssh://git@github.com/Ramprasad-Group/pgfingerprinting.git", rev = "v1.1.1"}
+
+[tool.poetry.dev-dependencies]
+tensorflow = "^2.8.0"
+gpflow = "^2.3.1"
+sklearn = "^0.0"
+numpy = "^1.22.2"
+pandas = "^1.4.0"
+matplotlib = "leras_tuner"
+keras-tuner = "^1.1.0"
+keras = "^2.8.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
