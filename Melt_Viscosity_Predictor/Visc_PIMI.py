@@ -130,6 +130,7 @@ class ShearRate(nn.Module):
         Scr = tau
         S_sc = beta*(S - a_t - Scr)
         f_S = eta_0 - torch.pow(beta, -1)*(n)*(torch.log(torch.tensor(1).to(self.device) + torch.exp(torch.tensor(-1).to(self.device)*S_sc)) + S_sc)
+        
         if torch.isnan(f_S).any():
             print('invalid out')
             nan_idx = (torch.isnan(f_S)==1).nonzero(as_tuple=True)

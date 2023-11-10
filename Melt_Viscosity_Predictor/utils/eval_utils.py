@@ -1,27 +1,6 @@
-from logging import raiseExceptions
-from sklearn.model_selection import KFold, StratifiedKFold
-from random import sample
 import numpy as np
 import pandas as pd
-from .metrics import MSE, OME
-import matplotlib.pyplot as plt
-import datetime
-import tensorflow as tf
-import keras_tuner as kt
-import json
-from os import sys
-import os
-sys.path.append('../')
-from ViscNN import ViscNN_concat_HP
-#from train_torch import run_training, MVDataset
-from torch.utils.data.dataloader import DataLoader
 from math import floor
-import yaml
-from functools import partial
-from ray import tune
-from ray.tune import CLIReporter
-from ray.tune.schedulers import HyperBandScheduler, ASHAScheduler
-import torch
 
 def get_Mw_samples(data:pd.DataFrame, full = False):
     id = 1000
@@ -64,7 +43,6 @@ def get_Mw_samples(data:pd.DataFrame, full = False):
                 data = data.drop(data.loc[data['SAMPLE_ID'] == i].index, axis = 0)
     sample_id = list(data.agg({'SAMPLE_ID': 'unique'})[0])
     return data, sample_id
-
 
 def Mw_test(samples_df: pd.DataFrame, samp):
     fp_cols = []
@@ -245,9 +223,6 @@ def get_temp_samples(data:pd.DataFrame, full = False):
 
     return data, sample_id
 
-
-
-
 def temp_test(samples_df: pd.DataFrame, samp, temp_range = 50):
     fp_cols = []
     for c in samples_df.columns:
@@ -300,7 +275,6 @@ def temp_test(samples_df: pd.DataFrame, samp, temp_range = 50):
     out = {'exp': [temp_exp, visc_exp, P_exp], 'data_in':[XX,M,S,T,P], 'sample': f'{trial[p].values[0]}'}
 
     return out
-
 
 def small_shear_test(samples_df: pd.DataFrame, samp):
     out = []

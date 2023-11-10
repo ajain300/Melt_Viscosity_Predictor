@@ -205,7 +205,7 @@ def main(date, data_type, save_path, plot = True):
 
 
     if DO_MW:
-        for mid in mw_ids:#list(range(1022,1034)):
+        for mid in mw_ids:
             try:
                 extraps = np.load(path + f'Mw/saved_extraps/{int(mid)}.npz')
                 extrap_exists = True
@@ -462,19 +462,6 @@ def main(date, data_type, save_path, plot = True):
             plt.fill_between(np.log10(S_ex_og).reshape(-1), (test_pred - test_var).reshape(-1,) , (test_pred + test_var).reshape(-1,), alpha = 0.2, color = colors['ANN'])
             
             
-            #HypNet Exptrapolation
-            # try:
-            #     test_pred, test_var, _ = predict_all_cv(HypNet_f,[XX_ex, y_scaler.transform(M_scaler.inverse_transform(np.array(M_ex)).reshape(-1,1)), S_ex_torch_2, T_ex, P_ex], is_torch = True)
-            #     test_pred = y_scaler.inverse_transform(np.array(test_pred).reshape(-1, 1)).reshape(-1,)
-            #     test_var = (y_scaler.inverse_transform(np.array(test_var).reshape(-1, 1)) - y_scaler.data_min_).reshape(-1,)
-            #     try:
-            #         n_0, n, S_cr  = fit_shear(np.array([a[0] for a in S_ex_og][:30]).astype(float), np.array([a for a in test_pred][:30]).astype(float))
-            #         predicted_constants_HypNet = pd.concat([predicted_constants_HypNet, pd.DataFrame({'Sample': [sample], 'z_shear': [n_0], 'S_cr': [S_cr], 'n':[n]})], ignore_index = True)
-            #     except:
-            #         print(f'Could not fit sample {sample} with HyperNet')
-            
-            # except:
-            #     print(f'HypNet Prediction Error on {sample}.')
 
             #try:
             print('PIMI inputs', XX_ex, y_scaler.transform(M_scaler.inverse_transform(np.array(M_ex)).reshape(-1,1)), S_ex_torch_2, T_ex, P_ex)

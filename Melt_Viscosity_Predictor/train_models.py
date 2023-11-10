@@ -1,3 +1,4 @@
+from copyreg import pickle
 import tensorflow as tf
 import pandas as pd
 import numpy as np
@@ -23,6 +24,7 @@ import datetime
 import keras.backend as K
 import random
 import yaml
+import json
 import argparse
 pd.options.mode.chained_assignment = None  # default='warn'
 import os
@@ -211,7 +213,7 @@ def main(file = None):
         test_df.to_pickle(f'{path}/test_data.pkl')
         models, history, gpr_models, gp_cv, NN_cv, PNN, PNN_cv, PNN_hist  = crossval_compare([create_ViscNN_concat], XX, yy, M=M, S=S, T=T, P = P, verbose = 1, gpr_model = create_GPR, epochs = 600, train_type=args.data_type, scalers = {"M": M_scaler, "S": S_scaler, "y": y_scaler, "s_torch": S_torch_scaler, "T":T_scaler, "m_torch":M_torch_scaler})
     else:
-        train_df.to_pickle(f'MODELS/{datetime.date.today()}_{args.data_type}/train_data.pkl')
+        train_df.to_pickle(f'{path}/train_data.pkl')
         models_f, history_f, gpr_models_f, gp_cv_f, NN_cv, PNN, PNN_cv, PNN_hist = crossval_compare([create_ViscNN_concat], XX, yy, M=M, S=S, T=T, P =P, verbose = 1, gpr_model = create_GPR, epochs = 600, train_type=args.data_type, scalers = {"M": M_scaler, "S": S_scaler, "y": y_scaler, "s_torch": S_torch_scaler, "T":T_scaler, "m_torch":M_torch_scaler})
     #################################################################################
 
@@ -248,7 +250,7 @@ def main(file = None):
         plt.ylim(-2, 12.5)
         plt.gca().set_aspect('equal', adjustable='box')
         
-        plt.savefig(f'MODELS/{datetime.date.today()}_{args.data_type}/ANN_parity_plot.png')
+        plt.savefig(f'../MODELS/{datetime.date.today()}_{args.data_type}/ANN_parity_plot.png')
         val_epochs(history[0], name = 'ANN', scaler = y_scaler, save = True, d_type= args.data_type)
 
 
@@ -293,7 +295,7 @@ def main(file = None):
             plt.xlim(-2, 12.5)
             plt.ylim(-2, 12.5)
             plt.gca().set_aspect('equal', adjustable='box')
-            plt.savefig(f'MODELS/{datetime.date.today()}_{args.data_type}/GPR_parity_plot.png')
+            plt.savefig(f'../MODELS/{datetime.date.today()}_{args.data_type}/GPR_parity_plot.png')
         except:
             print(f'GPR parity could not be made for {datetime.date.today()}_{args.data_type}')
         
@@ -340,12 +342,12 @@ def main(file = None):
         plt.ylim(-2, 12.5)
         plt.gca().set_aspect('equal', adjustable='box')
         
-        plt.savefig(f'MODELS/{datetime.date.today()}_{args.data_type}/PNN_parity_plot.png')
+        plt.savefig(f'../MODELS/{datetime.date.today()}_{args.data_type}/PNN_parity_plot.png')
         val_epochs(PNN_hist, name = 'PNN', scaler = y_scaler, save = True, d_type= args.data_type)
     #################################################################################
 
-    train_df.to_pickle(f'MODELS/{datetime.date.today()}_{args.data_type}/train_evals.pkl')
-    test_df.to_pickle(f'MODELS/{datetime.date.today()}_{args.data_type}/test_evals.pkl')
+    train_df.to_pickle(f'../MODELS/{datetime.date.today()}_{args.data_type}/train_evals.pkl')
+    test_df.to_pickle(f'../MODELS/{datetime.date.today()}_{args.data_type}/test_evals.pkl')
         
 def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False, verbose = 1, random_state = None, epochs = 500, gpr_model = None, save = True, train_type = 'split', scalers = None):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -368,7 +370,9 @@ def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False,
     gp_cv = []
     hist = [[] for i in range(len(NN_models))]
     HPs = [[] for i in range(len(NN_models))]
+    PENN_hyperparams = []
     fold_num = 0
+    path = '../'
     for train_index, test_index in kf.split(XX, np.where(S == 0,0,1)):
         X_train, X_val = XX[train_index], XX[test_index]
         y_train, y_val = yy[train_index], yy[test_index]
@@ -377,6 +381,7 @@ def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False,
         T_train, T_val = T[train_index], T[test_index]
         P_train, P_val = P[train_index], P[test_index]
         n_features = X_train.shape[1]
+        
         fit_in = [X_train, M_train, S_train, T_train, P_train]
         eval_in = [X_val, M_val, S_val, T_val, P_val]
         
@@ -399,8 +404,8 @@ def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False,
                 plt.ylim(-1, 1)
                 plt.gca().set_aspect('equal', adjustable='box')
                 plt.plot([-1,1], [-1,1], 'k')
-                os.makedirs(f'MODELS/{datetime.date.today()}_{train_type}/ANN', exist_ok = True)
-                plt.savefig(f'MODELS/{datetime.date.today()}_{train_type}/ANN/cv_{fold_num}_parity.png')
+                os.makedirs(path + f'MODELS/{datetime.date.today()}_{train_type}/ANN', exist_ok = True)
+                plt.savefig(path +f'MODELS/{datetime.date.today()}_{train_type}/ANN/cv_{fold_num}_parity.png')
             #TORCH NN TUNING
             #With scaling
             # fit_in = [X_train, M_train, S_train, T_train, P_train]
@@ -419,6 +424,7 @@ def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False,
             print('Best Configuration from RayTune ', best_config)
             model, train_loss, val_loss = run_training(best_config, n_fp = n_features,train_loader = tr_load, test_loader = val_load, device = device, EPOCHS = 200)
             PNN.append(model)
+            PENN_hyperparams.append(best_config)
             PNN_hist.append(val_loss)
             val_pred = model(*val_ten).cpu().detach().numpy()
             print(type(model))
@@ -429,8 +435,8 @@ def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False,
             plt.ylim(-1, 1)
             plt.gca().set_aspect('equal', adjustable='box')
             plt.plot([-1,1], [-1,1], 'k')
-            os.makedirs(f'MODELS/{datetime.date.today()}_{train_type}/PNN', exist_ok = True)
-            plt.savefig(f'MODELS/{datetime.date.today()}_{train_type}/PNN/cv_{fold_num}_parity.png')
+            os.makedirs(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN', exist_ok = True)
+            plt.savefig(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/cv_{fold_num}_parity.png')
 
             fit_in = [X_train, M_train, S_train, T_train, P_train]
             eval_in = [X_val, M_val, S_val, T_val, P_val]
@@ -450,8 +456,8 @@ def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False,
             plt.ylim(-1, 1)
             plt.gca().set_aspect('equal', adjustable='box')
             plt.plot([-1,1], [-1,1], 'k')
-            os.makedirs(f'MODELS/{datetime.date.today()}_{train_type}/GPR', exist_ok = True)
-            plt.savefig(f'MODELS/{datetime.date.today()}_{train_type}/GPR/cv_{fold_num}_parity.png')
+            os.makedirs(path+f'MODELS/{datetime.date.today()}_{train_type}/GPR', exist_ok = True)
+            plt.savefig(path+f'MODELS/{datetime.date.today()}_{train_type}/GPR/cv_{fold_num}_parity.png')
 
         if verbose > 0:
             #print('MSE: %.3f, RMSE: %.3f' % (error[-1], np.sqrt(error[-1])))
@@ -470,25 +476,29 @@ def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False,
         print('Saving models...')
         for i in range(len(NN_models)):
             for n in range(len(NN[i])):
-                NN[i][n].save(f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/model_{n}')
-                np.save(f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/hist_{n}',hist[i][n].history)
+                NN[i][n].save(path +f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/model_{n}')
+                np.save(path +f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/hist_{n}',hist[i][n].history)
                 try:
-                    with open(f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/model_{n}_hp.json', 'w') as fp:
+                    with open(path+f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/model_{n}_hp.json', 'w') as fp:
                         json.dump(HPs[i][n], fp)
                     fp.close()
                 except:
                     print('Could not print to json.')
             print(f'Saved ANN_{i}')
-            np.save(f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/OME_CV', np.array(NN_cv[i]))
+            np.save(path+f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/OME_CV', np.array(NN_cv[i]))
         for i in range(len(PNN)):
-            torch.save(PNN[i], f'MODELS/{datetime.date.today()}_{train_type}/PNN/model_{i}.pt')
-            np.save(f'MODELS/{datetime.date.today()}_{train_type}/PNN/OME_CV', np.array(PNN_CV))
+            torch.save(PNN[i].state_dict(), path + f'MODELS/{datetime.date.today()}_{train_type}/PNN/model_{i}.pt')
+            np.save(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/OME_CV', np.array(PNN_CV))
+            with open(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/hyperparam_{i}.json', "w") as file:
+                json.dump(PENN_hyperparams[i], file)
             print(f'Saved PNN_{i}')
+        with open(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/n_features.pickle', 'wb') as file:
+            pickle.dump(n_features, file)
         for i in range(len(gpr)):
             gpr[i].predict_f_compiled = tf.function(gpr[i].predict_f, input_signature=[tf.TensorSpec(shape=[None, X_train_.shape[1]], dtype=tf.float64)])
-            tf.saved_model.save(gpr[i], f'MODELS/{datetime.date.today()}_{train_type}/GPR/model_{i}')
-            print(f'Saved GPR_{i}')
-        np.save(f'MODELS/{datetime.date.today()}_{train_type}/GPR/OME_CV', np.array(gp_cv))
+            tf.saved_model.save(gpr[i], path+f'MODELS/{datetime.date.today()}_{train_type}/GPR/model_{i}')
+            print(path +f'Saved GPR_{i}')
+        np.save(path + f'MODELS/{datetime.date.today()}_{train_type}/GPR/OME_CV', np.array(gp_cv))
         print('saved models')
     return NN, hist, gpr, gp_cv, NN_cv, PNN, PNN_CV, PNN_hist
 

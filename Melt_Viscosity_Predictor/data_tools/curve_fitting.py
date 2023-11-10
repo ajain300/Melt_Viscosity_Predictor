@@ -113,6 +113,6 @@ def fit_WLF(T, eta, sigma = None):
     else: 
         pT = 200
 
-    vars_wlf, _ = curve_fit(WLF_obj, T, eta, p0 = [pT, 17.0,52.0, 8.0], bounds = ((160, -50, -50, -2),(T[0], 100, 500, 20)) ,sigma=sigma, maxfev = 7000)
+    vars_wlf, _ = curve_fit(WLF_obj, T, eta, p0 = [pT, 17.0,52.0, 8.0], bounds = ((100, -50, 20, -2),(T[0], 100, 500, 20)) ,sigma=sigma, maxfev = 7000)
     r2 = r2_score(eta, WLF_obj(T, *vars_wlf))
     return *vars_wlf, r2
