@@ -3,12 +3,12 @@ Custom_Train:
   hold_out: polymethylmethacrylate
   leave_out: Mw
 Train:
-  data_date: 2022-03-09
-  data_type: polysplitnew_0_polymethylmethacrylate_t3
+  data_date: 2022-03-08
+  data_type: full_data
   do_pca: false
-  full_data: false
+  full_data: true
   load_data: false
-  model_date: 2022-11-22
+  model_date: 2023-04-11
   test_size: 0.1
 data:
   aug: true

@@ -1,0 +1,1 @@
+{"fp_dense": 150, "layer_1": 120, "layer_2": 60, "l1_reg": 4e-05, "l2_reg": 2e-05, "dropout_1": 0.20000000000000004, "dropout_2": 0.1, "tuner/epochs": 30, "tuner/initial_epoch": 0, "tuner/bracket": 0, "tuner/round": 0}
