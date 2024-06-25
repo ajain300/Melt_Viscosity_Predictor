@@ -1,5 +1,8 @@
 /GradNorm/
 /Backup/
+/.ipynb_checkpoints/
 /Paper_Fig/
+/wandb/
+*.log
 *__pycache__*
 Melt_Viscosity_Predictor/MODELS/
