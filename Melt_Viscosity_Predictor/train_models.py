@@ -1,23 +1,27 @@
 from copyreg import pickle
+from posixpath import split
 import tensorflow as tf
 import pandas as pd
 import numpy as np
-#import tensorflow.keras as tfk
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_squared_error
 import joblib
 from utils.metrics import OME, MSE, get_CV_error
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler, PowerTransformer
-from ViscNN import create_ViscNN_concat, ViscNN_concat_HP
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
+from ViscNN import create_ViscNN_concat
 from sklearn.model_selection import StratifiedKFold
 import torch
 from torch.utils.data.dataloader import DataLoader
 from utils.model_utils import predict_all_cv, load_models
-from utils.train_utils import test_PIHN, polymer_train_test_split, custom_train_test_split, assign_sample_ids, hyperparam_opt, hyperparam_opt_ray
-from train_torch import MVDataset, run_training
+from utils.train_utils import *
+from model_versions import *
+from Visc_PENN import *
 import keras_tuner as kt
-from gpflow_tools.gpr_models import train_GPR, create_GPR
+#import gpflow
+#from gpflow_tools.gpr_models import train_GPR, create_GPR, GPflowRegressor
 from data_tools.dim_red import fp_PCA
 from data_tools.data_viz import val_epochs
 import datetime
@@ -31,27 +35,447 @@ import os
 import time
 import joblib
 from utils.Gpuwait import GpuWait
+from typing import Dict
+from pgfingerprinting import fp
+import ast
+import seaborn as sns
+import matplotlib.gridspec as gridspec
+import multiprocessing
+import traceback
+import pickle
 
 parser = argparse.ArgumentParser(description='Get training vars')
 parser.add_argument('--config', default='./config.yaml', help = 'get config file')
 
-def main(file = None):
-    global args
-    args = parser.parse_args()
-    if not file:
-        file = args.config
-    with open(file) as f:
-        config = yaml.safe_load(f)
+# Paths
+TRAINING_DIR = "/data/ayush/Melt_Viscosity_Predictor/Melt_Viscosity_Predictor/MODELS/"
+DATASET_DIR = "data_splits"
 
-    for key in config:
-        for k, v in config[key].items():
-            setattr(args, k, v)
+class ModelTrainer:
+    fp_memo = {}
+    def __init__(self, name : str, config_args : dict, models : list[BaseModel], data_split_type = 'polyphysics'):
+        # Set training directory
+        self.name = name
+        os.makedirs(os.path.join(TRAINING_DIR, name), exist_ok=True)
+        self.sim_dir = os.path.join(TRAINING_DIR, name)
+        self.args = config_args
+        self.models = models
+        #USE GPU
+        # with GpuWait(10, 3600*10, 0.9) as wait:
+        #     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+        
+        # Read data
+        data = self._get_data()
+ 
+        if not self._data_split_exists():
+            # Fingerprint data with pg fingerprinting
+            self.full_data_fp = self._fingerprint_dataset(data)
 
-    #USE GPU
+            # Get test train split
+            self.full_data = data
+            self.train_df, self.test_df, self.test_samples_unselect = self.split_data(data, data_split_type)
+            self.train_df_fp, self.test_df_fp = self.full_data_fp.loc[self.train_df.index], self.full_data_fp.loc[self.test_df.index]
+            
+            # Plot the data split
+            self.plot_data_split()
 
-    with GpuWait(10, 3600*10, 0.9) as wait:
-        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+            # Save the dataframes
+            self.save_data_split()
+        else: 
+            print("Loading data from folder.")
+            self.load_data_split()
 
+        # Create scalers
+        self.scalers = self.data_scalers(self.train_df, self.train_df_fp)
+        
+    def _get_data(self):
+        data = pd.read_excel(self.args.file)
+        data.columns = [str(c) for c in data.columns]
+        if args.aug == True and 'level_0' in data.columns:
+            data = data.drop(columns = 'level_0')
+        
+        data = data[[FeatureHeaders.smiles.value,
+                    FeatureHeaders.mol_weight.value,
+                    FeatureHeaders.shear_rate.value,
+                    FeatureHeaders.PDI.value,
+                    FeatureHeaders.temp.value,
+                    FeatureHeaders.visc.value,
+                    FeatureHeaders.sample_type.value,
+                    "Weight 1", "Weight 2"]]
+        
+
+        # Check data for needed features and delete the rows with nans
+        check_df = data[[FeatureHeaders.smiles.value,
+                    FeatureHeaders.mol_weight.value,
+                    FeatureHeaders.shear_rate.value,
+                    FeatureHeaders.PDI.value,
+                    FeatureHeaders.temp.value,
+                    FeatureHeaders.visc.value,
+                    FeatureHeaders.sample_type.value]]
+        nan_rows = check_df[check_df.isna().any(axis=1)].index
+        data = data.drop(nan_rows)
+
+        for c in ['Mw', 'Melt_Viscosity']:
+            data[c] = np.log10(data[c])
+
+        # convert smiles column into a proper list
+        data[FeatureHeaders.smiles.value] = data[FeatureHeaders.smiles.value].apply(convert_smiles_list)
+
+        # convert temp column from C to K
+        data[FeatureHeaders.temp.value] = data[FeatureHeaders.temp.value]+273.15
+
+        # Determine shear type and impute missing PDI values
+        data['ZERO_SHEAR'] = 1
+        data['SHEAR'] = 0
+        for i in data.index:
+            if data.loc[i, 'Shear_Rate'] != 0:
+                data.loc[i, 'SHEAR'] = 1
+                data.loc[i, 'ZERO_SHEAR'] = 0
+            if not data.loc[i,'PDI'] > 0 or data.loc[i,'PDI'] > 100:
+                data.loc[i,'PDI'] = 2.06
+
+        return data
+
+    def split_data(self, df : pd.DataFrame, split_type : str):
+        os.makedirs(os.path.join(TRAINING_DIR, self.name, DATASET_DIR), exist_ok=True)
+        if split_type == 'polyphysics':
+            train_df, test_df, tested_samples_unselected_df,split_conditions, group_median = poly_physics_train_test_split_unique_median(df, "SMILES", 
+            [FeatureHeaders.shear_rate.value])
+            group_median.to_csv(os.path.join(self.sim_dir, "group_medians.csv"))
+        elif split_type == 'poly_N_exp':
+            train_df, test_df = poly_physics_train_test_split_N_train(df, "SMILES", 5)
+        else:
+            raise Exception("Incorrect data split type.")
+        
+
+
+        return train_df, test_df, tested_samples_unselected_df
+
+    def data_scalers(self, df : pd.DataFrame, fp_df : pd.DataFrame) -> dict:
+        """
+        Create scalers for all features.
+        """
+        scalers: Dict[str, MinMaxScaler] = {}
+        shear = np.array(df[FeatureHeaders.shear_rate.value], dtype = float).reshape((-1,1))
+        Temp = np.array(df[FeatureHeaders.temp.value]).reshape((-1,1))
+        PDI = np.array(df[FeatureHeaders.PDI.value]).reshape((-1,1))
+        scalers[FeatureHeaders.fp.value] = MinMaxScaler(copy = False, feature_range = (-1,1)).fit(fp_df)
+        #XX = np.array(scaler.fit(df.filter(fp_cols)).transform(df.filter(fp_cols)))
+        
+        yy = np.array(df.loc[:,'Melt_Viscosity']).reshape((-1,1))
+        scalers[FeatureHeaders.visc.value] = MinMaxScaler(feature_range = (-1,1)).fit(yy)
+        scalers[FeatureHeaders.temp.value] = MinMaxScaler(feature_range = (-1,1)).fit(Temp)
+        scalers[FeatureHeaders.inv_temp.value] = MinMaxScaler(feature_range = (-1,1)).fit(1/Temp)
+        logMw = np.array(df[FeatureHeaders.mol_weight.value], dtype = float).reshape((-1,1))
+        scalers[FeatureHeaders.mol_weight.value] = MinMaxScaler(feature_range = (-1,1)).fit(logMw)
+        scalers[FeatureHeaders.shear_rate.value] = MinMaxScaler(feature_range = (-1,1)).fit(np.log10(shear + 0.00001))
+        scalers[FeatureHeaders.PDI.value] = MinMaxScaler(feature_range = (-1,1)).fit(np.log(PDI))
+        
+
+        scaler_path = os.path.join(self.sim_dir, "dataset", "scalers.pkl")
+        # save scalers
+        with open(scaler_path, 'wb') as file:
+            # Dump the dictionary to the file using pickle
+            pickle.dump(scalers, file)
+        return scalers
+    
+    def _fingerprint_copolymer(self, smiles_list, conc_list) -> dict:
+        """
+        Given the SMILES of a blend, calculate the fingerprint.
+        TODO assumed a blend with two homopolymers
+        """
+        
+        # Get SMILES for all homopolymers and collect in df
+        fp_df_list = []
+        for i, smiles in enumerate(smiles_list):
+            if smiles in self.fp_memo.keys():
+                homo_fp = self.fp_memo[smiles]
+            else:
+                homo_fp = fp.fingerprint_from_smiles(smiles)
+                self.fp_memo[smiles] = homo_fp
+            fp_df_list.append(pd.DataFrame([homo_fp], index = [i]))
+
+        # combine dfs
+        combined_df = pd.concat(fp_df_list, axis=0).fillna(0)
+
+        # use the dfs to calculate harmonic sum
+        w_1 = conc_list[0]
+        w_2 = conc_list[1]
+        fp_1 = combined_df.loc[0]
+        fp_2 = combined_df.loc[1]
+        co_fp = w_1*fp_1 + w_2*fp_2
+
+        return co_fp.to_dict()
+        
+    def _fingerprint_blend(self, smiles_list, conc_list) -> dict:
+        """
+        Given the SMILES of a blend, calculate the fingerprint.
+        TODO assumed a blend with two homopolymers
+        """
+        
+        # Get SMILES for all homopolymers and collect in df
+        fp_df_list = []
+        for i, smiles in enumerate(smiles_list):
+            if smiles in self.fp_memo.keys():
+                homo_fp = self.fp_memo[smiles]
+            else:
+                homo_fp = fp.fingerprint_from_smiles(smiles)
+                self.fp_memo[smiles] = homo_fp
+            fp_df_list.append(pd.DataFrame([homo_fp], index = [i]))
+
+        # combine dfs
+        combined_df = pd.concat(fp_df_list, axis=0).fillna(0)
+
+        # use the dfs to calculate harmonic sum
+        w_1 = conc_list[0]
+        w_2 = conc_list[1]
+        fp_1 = combined_df.loc[0]
+        fp_2 = combined_df.loc[1]
+        blend_fp = 1/((w_2/(fp_1+1))+ (w_1/(fp_2+1))) - 1
+        
+        return blend_fp.to_dict()
+    
+    def _fingerprint_dataset(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Uses pgfingerprinting to evaluate the fingerprints for all samples in the dataset
+
+        Args:
+        data: Dataframe with smiles and weight values
+
+        """
+        # Fingerprint homopolymers, copolymers, and blends
+        # TODO make this more efficient
+        
+        # If the fingerprint dataset already exists, use this instead of re-fingerprinting
+        if os.path.exists(os.path.join(self.sim_dir, "dataset", "full_data_fp.pkl")):
+            print(f"Read fingerprinted dataset from {os.path.join(self.sim_dir, 'dataset', 'full_data_fp.pkl')} ...")
+            fp_df = pd.read_pickle(os.path.join(self.sim_dir, "dataset", "full_data_fp.pkl"))
+            return fp_df
+        
+        fp_dict = {}
+        data = data.copy()
+        
+        print(f"Fingerprinting dataset...")
+        start = time.time()
+        for row in data.index:
+            if data.loc[row, FeatureHeaders.sample_type.value] == 'Homopolymer':
+                smiles = data.loc[row, FeatureHeaders.smiles.value][0]
+                if smiles in self.fp_memo.keys():
+                    fp_dict[row] = self.fp_memo[smiles]
+                else:
+                    fp_dict[row] = fp.fingerprint_from_smiles(smiles)
+                    self.fp_memo[smiles] = fp_dict[row]
+            elif data.loc[row, FeatureHeaders.sample_type.value] == 'Copolymer':
+                smiles_list = [s.strip() for s in data.loc[row, FeatureHeaders.smiles.value]]
+                conc_sum = data.loc[row, "Weight 1"] + data.loc[row, "Weight 2"]
+                conc_list = [data.loc[row, "Weight 1"] + (1.0-conc_sum), data.loc[row, "Weight 2"]]
+                try:
+                    fp_dict[row] = self._fingerprint_copolymer(smiles_list=smiles_list, conc_list=conc_list)
+                    # fp_dict[row] = fp.fingerprint_any_polymer(smiles_list=smiles_list, conc_list=conc_list)
+                except Exception as e:
+                    print(e)
+                    print(smiles_list, conc_list)
+                    exit()
+            elif data.loc[row, FeatureHeaders.sample_type.value] == 'Blend':
+                smiles_list = [s.strip() for s in data.loc[row, FeatureHeaders.smiles.value]]
+                conc_sum = data.loc[row, "Weight 1"] + data.loc[row, "Weight 2"]
+                conc_list = [data.loc[row, "Weight 1"] + (1.0-conc_sum), data.loc[row, "Weight 2"]]
+                fp_dict[row] = self._fingerprint_blend(smiles_list=smiles_list, conc_list=conc_list)
+
+        ela = time.time() - start
+        print(f"fp total time: ", ela)
+        
+        fp_df = pd.DataFrame.from_dict(fp_dict, orient ='index').fillna(0)
+
+        return fp_df
+
+    def train_models(self):
+        for model in self.models:
+            model.set_scalers(self.scalers.copy())
+            model.set_path(os.path.join(self.sim_dir, "models"))
+            print(f"Training {model.name}")
+            try:
+                model.train_cv(self.train_df, self.train_df_fp)
+            except Exception as e:
+                model.logger.exception(e)
+                print(f"{model.name} training failed, see log file for info")
+                raise e
+            print(f"Evaluating {model.name}")
+            model.evaluate(self.test_df, self.test_df_fp)
+    
+    def train_models_parallel(self):
+        #multi_inputs = [(self, m) for m in self.models]
+        # Create a multiprocessing pool and parallelize the execution
+        with multiprocessing.get_context('spawn').Pool(processes=len(self.models)) as pool:
+            pool.map(self._train_single_model,self.models)
+
+    def _train_single_model(self, model):
+        model.set_scalers(self.scalers)
+        model.set_path(os.path.join(self.sim_dir, "models"))
+        print(f"Training {model.name}")
+        try:
+            model.train_cv(self.train_df, self.train_df_fp)
+        except Exception as e:
+            model.logger.exception(e)
+            print(f"{model.name} training failed, see log file for info")
+            exit()
+        print(f"Evaluating {model.name}")
+        model.evaluate(self.test_df, self.test_df_fp)
+
+    def plot_data_split(self):
+        sns.set_theme()
+
+        sns.set(font_scale = 1.5, style = 'whitegrid')
+        y_full = np.array(self.full_data[FeatureHeaders.visc.value])
+        y_lim = (np.min(y_full) - 0.5, np.max(y_full) + 0.5)
+
+        plotting_dir = os.path.join(TRAINING_DIR, self.name, DATASET_DIR)
+
+
+        train_df = self.train_df.copy()
+        train_df['Dataset'] = 'Train'
+        test_df = self.test_df.copy()
+        test_df['Dataset'] = 'Test'
+        combined_df = pd.concat([train_df, test_df]).reset_index(drop=True)
+            # ax1.scatter(M_scaler.inverse_transform(M_test), y_scaler.inverse_transform(y_test), edgecolors= 'black')
+        Mw_plot = sns.jointplot(data=combined_df, x=FeatureHeaders.mol_weight.value, y=FeatureHeaders.visc.value, hue='Dataset', kind='scatter', height=5)
+        Mw_plot.ax_marg_y.remove()
+        Mw_plot.ax_joint.set_xticks([3,5,7], [rf'$10^{i}$' for i in [3,5,7]], fontsize = 15)
+        Mw_plot.ax_joint.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,9,4))] + [r'$10^{12}$'], fontsize = 15)
+        Mw_plot.set_axis_labels(r'$M_w$ (g/mol)', r'$\eta$ (Poise)')
+        Mw_plot.ax_joint.set(ylim = y_lim)
+        
+        plt.savefig(os.path.join(plotting_dir, "Mw_plot.png"))
+
+        for test_id in test_df['test_id'].unique():
+            test_sample_unselected_df = self.test_samples_unselect.copy()[self.test_samples_unselect['test_id'] == test_id]
+            test_sample_unselected_df['Dataset'] = 'Train_Samples'
+            test_df = self.test_df.copy()[self.test_df['test_id'] == test_id]
+            test_df['Dataset'] = 'Test'
+            print("test_df: ", test_df)
+            combined_df = pd.concat([test_sample_unselected_df, test_df]).reset_index(drop=True)
+                # ax1.scatter(M_scaler.inverse_transform(M_test), y_scaler.inverse_transform(y_test), edgecolors= 'black')
+            print(combined_df)
+            Mw_plot = sns.jointplot(data=combined_df, x=FeatureHeaders.mol_weight.value, y=FeatureHeaders.visc.value, hue='Dataset', kind='scatter', height=5)
+            Mw_plot.ax_marg_y.remove()
+            Mw_plot.ax_joint.set_xticks([3,5,7], [rf'$10^{i}$' for i in [3,5,7]], fontsize = 15)
+            Mw_plot.ax_joint.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,9,4))] + [r'$10^{12}$'], fontsize = 15)
+            Mw_plot.set_axis_labels(r'$M_w$ (g/mol)', r'$\eta$ (Poise)')
+            Mw_plot.ax_joint.set(ylim = y_lim)
+            
+            plt.savefig(os.path.join(plotting_dir, f"Mw_plot_unselected_{test_id}.png"))
+
+
+        #Zero Shear
+
+        zshear_df = combined_df[combined_df[FeatureHeaders.shear_rate.value] == 0]
+        # for i in zshear_df.index:
+        #     zshear_df.loc[i, ['Shear Rate (1/s)']] = zshear_df.loc[i, ['Shear Rate (1/s)']][0]
+        #     zshear_df.loc[i, ['Melt Viscosity (Poise)']] = zshear_df.loc[i, ['Melt Viscosity (Poise)']][0]
+
+        zshear_plot = sns.scatterplot(data=zshear_df, x=FeatureHeaders.shear_rate.value, y=FeatureHeaders.visc.value, hue='Dataset')
+        #zshear_plot = sns.scatterplot(data = zshear_df, x = 'Shear Rate (1/s)', y = 'Melt Viscosity (Poise)')
+        #zshear_plot.ax_marg_y.remove()
+        zshear_plot.set_xticks([0], ['0'], fontsize = 15)
+        zshear_plot.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,9,4))] + [r'$10^{12}$'], fontsize =15)
+        zshear_plot.set(xlabel = None, ylabel = None , ylim = y_lim)
+
+        plt.savefig(os.path.join(plotting_dir, "zshear_plot.png"))
+
+        #Shear
+
+        shear_df = combined_df[combined_df[FeatureHeaders.shear_rate.value] > 0]
+        shear_df[FeatureHeaders.shear_rate.value] = np.log10(shear_df[FeatureHeaders.shear_rate.value])
+        # for i in shear_df.index:
+        #     shear_df.loc[i, ['Shear Rate (1/s)']] = shear_df.loc[i, ['Shear Rate (1/s)']][0]
+        #     shear_df.loc[i, ['Melt Viscosity (Poise)']] = shear_df.loc[i, ['Melt Viscosity (Poise)']][0]
+
+        #shear_plot = sns.jointplot(data = shear_df, x = 'Shear Rate (1/s)', y = 'Melt Viscosity (Poise)', kind = 'scatter', height = 5)
+        shear_plot = sns.jointplot(data=shear_df, x=FeatureHeaders.shear_rate.value, y=FeatureHeaders.visc.value, hue='Dataset', kind='scatter', height=5)
+        
+        shear_plot.ax_marg_y.remove()
+        shear_plot.ax_joint.set_xticks(list(np.arange(-4,7,4)),  [r'$10^{-4}$'] + [rf'$10^{i}$' for i in list(np.arange(0,7,4))], fontsize = 15)
+        shear_plot.ax_joint.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,13,4))], fontsize =15)
+        shear_plot.set_axis_labels(r'$\dot{\gamma}$ (1/s)', r'$\eta$ (Poise)')
+        shear_plot.ax_joint.set(yticklabels=[], ylabel = None, ylim = y_lim)
+
+        plt.savefig(os.path.join(plotting_dir, "shear_plot.png"))
+
+        #Temperature
+
+        # temp_df = pd.DataFrame({'Temp': Temp.reshape(-1,), 'Visc': yy.reshape(-1,)})
+        # for i in temp_df.index:
+        #     temp_df.loc[i, ['Temp']] = temp_df.loc[i, ['Temp']][0]
+        #     temp_df.loc[i, ['Visc']] = temp_df.loc[i, ['Visc']][0]
+        temp_plot = sns.jointplot(data=combined_df, x=FeatureHeaders.temp.value, y=FeatureHeaders.visc.value, hue='Dataset', kind='scatter', height=5)
+        #temp_plot = sns.jointplot(data = temp_df, x = 'Temp', y = 'Visc', kind = 'scatter', height = 5)
+        temp_plot.ax_marg_y.remove()
+        temp_plot.set_axis_labels(r'Temperature (K)', r'$\eta$ (Poise)')
+        temp_plot.ax_joint.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,9,4))] + [r'$10^{12}$'], fontsize = 15)
+        temp_plot.ax_joint.set(ylim = y_lim, ylabel = None)
+
+        plt.savefig(os.path.join(plotting_dir, "temp_plot.png"))
+
+        for test_id in test_df['test_id'].unique():
+            test_sample_unselected_df = self.test_samples_unselect.copy()[self.test_samples_unselect['test_id'] == test_id]
+            test_sample_unselected_df['Dataset'] = 'Train_Samples'
+            test_df = self.test_df.copy()[self.test_df['test_id'] == test_id]
+            test_df['Dataset'] = 'Test'
+            print("test_df: ", test_df)
+            combined_df = pd.concat([test_sample_unselected_df, test_df]).reset_index(drop=True)
+                # ax1.scatter(M_scaler.inverse_transform(M_test), y_scaler.inverse_transform(y_test), edgecolors= 'black')
+            print(combined_df)
+            temp_plot = sns.jointplot(data=combined_df, x=FeatureHeaders.temp.value, y=FeatureHeaders.visc.value, hue='Dataset', kind='scatter', height=5)
+            temp_plot.ax_marg_y.remove()
+            temp_plot.ax_joint.set_xticks([0, 200, 400, 600], [rf'$10^{i}$' for i in [0, 200, 400, 600]], fontsize = 15)
+            temp_plot.ax_joint.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,9,4))] + [r'$10^{12}$'], fontsize = 15)
+            temp_plot.set_axis_labels(r'$M_w$ (g/mol)', r'$\eta$ (Poise)')
+            temp_plot.ax_joint.set(ylim = y_lim)
+            
+            plt.savefig(os.path.join(plotting_dir, f"Mw_plot_unselected_{test_id}.png"))
+
+        #PDI
+
+        # PDI_df = pd.DataFrame({'PDI': PDI.reshape(-1,), 'Visc': yy.reshape(-1,)})
+        # for i in PDI_df.index:
+        #     PDI_df.loc[i, ['PDI']] = PDI_df.loc[i, ['PDI']][0]
+        #     PDI_df.loc[i, ['Visc']] = PDI_df.loc[i, ['Visc']][0]
+
+        #PDI_plot = sns.jointplot(data = PDI_df, x = 'PDI', y = 'Visc', kind = 'scatter', height = 5)
+        PDI_plot = sns.jointplot(data=combined_df, x=FeatureHeaders.PDI.value, y=FeatureHeaders.visc.value, hue='Dataset', kind='scatter', height=5)
+        PDI_plot.set_axis_labels(r'PDI', r'$\eta$ (Poise)')
+        PDI_plot.ax_joint.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,9,4))] + [r'$10^{12}$'], fontsize = 15)
+        PDI_plot.ax_joint.set(ylim = y_lim, ylabel = None)
+
+        plt.savefig(os.path.join(plotting_dir, "PDI_plot.png"))
+
+    def save_data_split(self) -> None:
+        os.makedirs(os.path.join(self.sim_dir, "dataset"), exist_ok=True)
+        # save each df in the data split
+        self.full_data_fp.to_pickle(os.path.join(self.sim_dir, "dataset", "full_data_fp.pkl"))
+        self.train_df.to_pickle(os.path.join(self.sim_dir, "dataset", "train_df.pkl"))
+        self.test_df.to_pickle(os.path.join(self.sim_dir, "dataset", "test_df.pkl"))
+        self.train_df_fp.to_pickle(os.path.join(self.sim_dir, "dataset", "train_df_fp.pkl"))
+        self.test_df_fp.to_pickle(os.path.join(self.sim_dir, "dataset", "test_df_fp.pkl"))
+
+    def load_data_split(self) -> None:
+        self.full_data_fp = pd.read_pickle(os.path.join(self.sim_dir, "dataset", "full_data_fp.pkl"))
+        self.train_df = pd.read_pickle(os.path.join(self.sim_dir, "dataset", "train_df.pkl"))
+        self.test_df = pd.read_pickle(os.path.join(self.sim_dir, "dataset", "test_df.pkl"))
+        self.train_df_fp = pd.read_pickle(os.path.join(self.sim_dir, "dataset", "train_df_fp.pkl"))
+        self.test_df_fp = pd.read_pickle(os.path.join(self.sim_dir, "dataset", "test_df_fp.pkl"))
+    
+    def _data_split_exists(self) -> bool:
+        """
+        Internal function to check if the data split is recorded. True if it is.
+        """
+        return os.path.exists(os.path.join(self.sim_dir, "dataset", "full_data_fp.pkl")) and \
+            os.path.exists(os.path.join(self.sim_dir, "dataset", "train_df.pkl"))
+
+if __name__ == '__main__':
+    # Set multiprocessing to spawn
+    multiprocessing.set_start_method('spawn', force=True)
+    
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
@@ -62,445 +486,47 @@ def main(file = None):
         except RuntimeError as e:
             print(e)
 
-
-    # get data from excel
-    data = pd.read_excel(args.file)
-    data.columns = [str(c) for c in data.columns]
-    if args.aug == True and 'level_0' in data.columns:
-        data = data.drop(columns = 'level_0')
-    
-    ids = {'shear': [], 'Mw': []}
-    data, ids['shear'], ids['Mw'] = assign_sample_ids(data.copy())
-
-    
-    OG_fp = []
-    for c in data.columns:
-        if isinstance(c, str):
-            if 'fp' in c:
-                OG_fp.append(c)
-    len(OG_fp)
-
-
-    #Data Processing #############################################
-    if args.do_pca:
-        data, fp_cols, pca = fp_PCA(data, 17, cols = OG_fp)
-        cols = fp_cols + ['Mw', 'Temperature', 'Shear_Rate','Melt_Viscosity', 'PDI']
-    else:
-        fp_cols = OG_fp
-        cols = fp_cols + ['Mw', 'Temperature', 'Shear_Rate','Melt_Viscosity', 'PDI', 'Polymer', 'SHEAR', 'ZERO_SHEAR', 'Sample_Type', 'SMILES', 'SAMPLE_ID']
-    
-    for c in ['Mw', 'Melt_Viscosity']:
-        data[c] = np.log10(data[c])
-
-    data['ZERO_SHEAR'] = 1
-    data['SHEAR'] = 0
-    data['log_Shear_Rate'] = 0
-    for i in data.index:
-        if data.loc[i, 'Shear_Rate'] != 0:
-            data.loc[i,'log_Shear_Rate'] = np.log10(data.loc[i, 'Shear_Rate'])
-            data.loc[i, 'SHEAR'] = 1
-            data.loc[i, 'ZERO_SHEAR'] = 0
-        if not data.loc[i,'PDI'] > 0:
-            data.loc[i,'PDI'] = 2.06
-        if data.loc[i,'PDI'] > 100:
-            data.loc[i,'PDI'] = 2.06
-            #data = data.drop([i])
-
-    #################################################################
-
-    #get filtered data
-    filtered_data = data.loc[:, cols].dropna(subset = ['Mw', 'Shear_Rate'])
-
-    #Create Test-Train Split#########################################
-    if args.full_data:
-        train_df = filtered_data.sample(frac = 1)
-        test_df = filtered_data.sample(frac = 1) #dummy df for compatibility
-    else:
-        if args.load_data:
-            train_df = pd.read_pickle(f'MODELS/{args.data_date}_{args.data_type}/train_data.pkl')
-            if args.data_type == 'full':
-                test_df = filtered_data.sample(frac = 0.05) #dummy df for compatibility
-            else:
-                test_df = pd.read_pickle(f'MODELS/{args.data_date}_{args.data_type}/test_data.pkl')
-        else: 
-            if args.data_split_type == 'custom':
-                total_samps = len(ids['Mw']) + len(ids['shear'])
-                leave_out_id = [0]
-                # Get list of already completed test ids
-                completed_ids = [float(f.split('[', 1)[1].split(']')[0]) for f in os.listdir('./MODELS') if 'custom' in f]
-                print(f'comp ids {completed_ids}')
-                while (data.loc[data['SAMPLE_ID'] == leave_out_id[0]].shape[0] < 5 or data.loc[data['SAMPLE_ID'] == leave_out_id[0]].shape[0] > 10) and leave_out_id[0] not in completed_ids:
-                    leave_out_id = random.sample(ids[args.leave_out],1)
-                    print(data.loc[data['SAMPLE_ID'] == leave_out_id[0]])
-                train_df, test_df = custom_train_test_split(filtered_data, test_id = leave_out_id, id_col= 'SAMPLE_ID')
-                args.data_type = f'{args.data_type}_{args.leave_out}_{leave_out_id}'
-            
-            elif args.data_split_type == 'polymer':
-                train_df, test_df = polymer_train_test_split(filtered_data, test_size = args.test_size, hold_out= args.hold_out)
-                print('SHEAR_TEST_post split', np.max(test_df['Shear_Rate']), np.min(test_df['Shear_Rate']))
-            elif args.data_split_type == 'random':
-                train_df, test_df = train_test_split(filtered_data, test_size = args.test_size)
-            
-            train_df = train_df.loc[:, (train_df != 0).any(axis=0)]
-            new_fp = []
-            for c in train_df.columns:
-                if isinstance(c, str):
-                    if 'fp' in c:
-                        new_fp.append(c)
-
-            if len(OG_fp) != len(new_fp):
-                test_df = test_df.drop(columns = list(set(OG_fp) - set(new_fp)))
-    ####################################################################################
-
-    
-    print(len(train_df))
-    print(len(test_df))
-    #Scale Variables ################################################################# 
-    #Only fit scaling on train set and not the test set
-    logMw = np.array(train_df['Mw'], dtype = float).reshape((-1,1))
-    shear = np.array(train_df['Shear_Rate'], dtype = float).reshape((-1,1))
-    print('SHEAR', np.max(shear), np.min(shear))
-    Temp = np.array(train_df['Temperature']).reshape((-1,1))
-    PDI = np.array(train_df['PDI']).reshape((-1,1))
-
-    scaler = MinMaxScaler(copy = False, feature_range = (0,1))
-    XX = np.array(scaler.fit(train_df.filter(fp_cols)).transform(train_df.filter(fp_cols)))
-    yy = np.array(train_df.loc[:,'Melt_Viscosity']).reshape((-1,1))
-
-    y_scaler = MinMaxScaler(feature_range = (-1,1)).fit(yy)
-    yy = y_scaler.transform(yy);
-    T_scaler = MinMaxScaler(feature_range = (0,1)).fit(Temp)
-    T = T_scaler.transform(Temp);
-    M_scaler = MinMaxScaler(feature_range = (0,1)).fit(logMw)
-    M_torch_scaler = MinMaxScaler(feature_range = (0,1)).fit(np.power(10, logMw))
-    M = M_scaler.transform(logMw);
-    #S_trans = PowerTransformer(standardize = False).fit(shear)
-    S_scaler = MinMaxScaler(feature_range = (0,1)).fit(np.log10(shear + 0.00001))
-    S = S_scaler.transform(np.log10(shear + 0.00001))
-    S_torch_scaler = MinMaxScaler(feature_range = (0,1)).fit(shear)
-    P_scaler = MinMaxScaler(feature_range = (0,1)).fit(PDI)
-    P = P_scaler.transform(PDI)
-    #shear = S_scaler.transform((shear))
-    #gpr_Mcr, mcr_cv_error = Mcr_gpr_train(OG_fp, None, M_scaler, scaler, transform = False)
-    
-    y_test = y_scaler.transform(np.array(test_df.loc[:,'Melt_Viscosity']).reshape((-1,1)))
-    X_test = np.array(scaler.transform(test_df.filter(fp_cols)))
-    M_test = M_scaler.transform(np.array(test_df['Mw']).reshape((-1,1)))
-    S_test = S_scaler.transform(np.log10(0.00001 + np.array(test_df['Shear_Rate']).reshape((-1,1))))
-    print('SHEAR_TEST', np.max(test_df['Shear_Rate']), np.min(test_df['Shear_Rate']))
-    print('SHEAR_TEST_trans', np.max(S_test), np.min(S_test))
-    T_test = np.array(test_df['Temperature']).reshape((-1,1))
-    T_test = T_scaler.transform(T_test)
-    P_test = P_scaler.transform(np.array(test_df['PDI']).reshape((-1,1)))
-    #################################################################################
-
-    #TRAINING #######################################################################
-    path = f'../MODELS/{datetime.date.today()}_{args.data_type}'
-    os.makedirs(path, exist_ok = True)
-    os.makedirs(path + '/scalers/', exist_ok = True)
-    
-    #Save the scalers in the directory
-    
-    for sc, n in zip([y_scaler, M_scaler, S_scaler, T_scaler, P_scaler, scaler, S_torch_scaler], ['y_scaler', 'M_scaler', 'S_scaler', 'T_scaler', 'P_scaler', 'scaler', 'S_torch_scaler']):
-        sc_name = n + '.save'
-        joblib.dump(sc, path + '/scalers/' + sc_name)
-
-    #test_PIHN(XX, yy, M=M, S=S, T=T, P = P, scalers = {"M": M_scaler, "S": S_scaler, "y": y_scaler, "s_torch": S_torch_scaler, "T":T_scaler})
-    
-    print(XX,yy, M,S,T,P)
-    if not args.full_data:
-        train_df.to_pickle(f'{path}/train_data.pkl')
-        test_df.to_pickle(f'{path}/test_data.pkl')
-        models, history, gpr_models, gp_cv, NN_cv, PNN, PNN_cv, PNN_hist  = crossval_compare([create_ViscNN_concat], XX, yy, M=M, S=S, T=T, P = P, verbose = 1, gpr_model = create_GPR, epochs = 600, train_type=args.data_type, scalers = {"M": M_scaler, "S": S_scaler, "y": y_scaler, "s_torch": S_torch_scaler, "T":T_scaler, "m_torch":M_torch_scaler})
-    else:
-        train_df.to_pickle(f'{path}/train_data.pkl')
-        models_f, history_f, gpr_models_f, gp_cv_f, NN_cv, PNN, PNN_cv, PNN_hist = crossval_compare([create_ViscNN_concat], XX, yy, M=M, S=S, T=T, P =P, verbose = 1, gpr_model = create_GPR, epochs = 600, train_type=args.data_type, scalers = {"M": M_scaler, "S": S_scaler, "y": y_scaler, "s_torch": S_torch_scaler, "T":T_scaler, "m_torch":M_torch_scaler})
-    #################################################################################
-
-    # PLOT PARITY ###################################################################
-    if not args.full_data:
-        yy = y_scaler.inverse_transform(yy)
-        y_test = y_scaler.inverse_transform(y_test)
-        
-        test_pred, test_var, _ = predict_all_cv(models[0],[X_test, M_test, S_test, T_test, P_test])
-        train_pred, train_var, _ = predict_all_cv(models[0],[XX, M, S, T, P])
-        test_pred = y_scaler.inverse_transform(np.array(test_pred).reshape(-1, 1))
-        train_pred = y_scaler.inverse_transform(np.array(train_pred).reshape(-1, 1))
-        test_var = y_scaler.inverse_transform(np.array(test_var).reshape(-1, 1) - 1) - y_scaler.data_min_
-        train_var = y_scaler.inverse_transform(np.array(train_var).reshape(-1, 1) - 1) - y_scaler.data_min_
-
-        train_df["ANN_Pred"] = train_pred
-        test_df["ANN_Pred"] = test_pred
-        train_df["ANN_Pred_var"] = train_var
-        test_df["ANN_Pred_var"] = test_var
-
-        plt.figure(figsize = (5.5,5.5))
-        plt.errorbar(yy, list(train_pred.reshape(-1,)), yerr = list(np.array(train_var).reshape(-1,)), c = 'orange', fmt = 'o', label = f'Train: {M.shape[0]} datapoints, ' 
-        + r'$R^2$ = ' + "{:1.3f}, ".format(r2_score(yy, train_pred)) + "OME = {:1.4f}".format(get_CV_error(NN_cv, scaler= y_scaler)))
-
-        plt.errorbar(y_test , list(test_pred.reshape(-1,)), yerr= list(np.array(test_var).reshape(-1,)), fmt =  'o', label = f'Test: {M_test.shape[0]} datapoints, ' 
-        + r'$R^2$ = ' + "{:1.3f}, ".format(r2_score(y_test, test_pred)) + "OME = {:1.4f}".format(OME(y_test, test_pred)))
-
-        plt.plot(np.linspace((min(yy)[0]), (max(yy)[0]), num = 2),np.linspace((min(yy)[0]), (max(yy)[0]), num = 2),'k-', zorder = 10)
-        plt.ylabel(r'$Log$ Viscosity (Poise) ML Predicted')
-        plt.xlabel(r'$Log$ Viscosity (Poise) Experimental Truth')
-        plt.legend(loc = 'upper left', frameon = False, prop={"size":8})
-        plt.title('ANN Parity Plot')
-        plt.xlim(-2, 12.5)
-        plt.ylim(-2, 12.5)
-        plt.gca().set_aspect('equal', adjustable='box')
-        
-        plt.savefig(f'../MODELS/{datetime.date.today()}_{args.data_type}/ANN_parity_plot.png')
-        val_epochs(history[0], name = 'ANN', scaler = y_scaler, save = True, d_type= args.data_type)
-
-
-        #GPR Parity
-        try:
-            gpr_model = gpr_models[np.argmin(gp_cv)]
-            X_ = np.concatenate((X_test, M_test, S_test, T_test, P_test), axis = 1)
-            X_train = np.concatenate((XX, M,S, T, P), axis = 1)
-            test_pred, var = gpr_model.predict_f(tf.convert_to_tensor(X_, dtype=tf.float64))
-            train_pred, var_train = gpr_model.predict_f(X_train)
-            error =  [i[0] for i in np.array(var).tolist()]
-            test_pred = y_scaler.inverse_transform(np.array(test_pred).reshape(-1, 1))
-            train_pred = y_scaler.inverse_transform(np.array(train_pred).reshape(-1, 1))
-            var = y_scaler.inverse_transform(np.array(var).reshape(-1, 1) - 1) - y_scaler.data_min_
-            var_train = y_scaler.inverse_transform(np.array(var_train).reshape(-1, 1) - 1) - y_scaler.data_min_
-            high_var_test = np.where(np.array(var) > 10)
-            test_pred = np.delete(np.array(test_pred), high_var_test)
-            y_test_new = np.delete(np.array(y_test), high_var_test)
-            var = np.delete(np.array(var), high_var_test)
-            # plt.plot(xx[:,0], samples[:, :, 0].numpy().T, "C0", linewidth=0.5)
-
-            test_pred = test_pred.reshape(-1,1)
-            train_pred = train_pred.reshape(-1,1)
-            train_df["GPR_Pred"] = train_pred
-            test_df["GPR_Pred"] = test_pred
-            train_df["GPR_Pred_var"] = var_train
-            test_df["GPR_Pred_var"] = var
-
-            plt.figure(figsize = (5.5,5.5))
-            plt.errorbar(yy, list(train_pred.reshape(-1,)), yerr = list(np.array(var_train).reshape(-1,)), c = 'orange', fmt = 'o', label = f'Train: {M.shape[0]} datapoints, ' 
-            + r'$R^2$ = ' + "{:1.3f}, ".format(r2_score( yy, train_pred)) + "OME = {:1.4f}".format(get_CV_error(gp_cv, scaler= y_scaler)))
-
-            plt.errorbar(y_test , list(test_pred.reshape(-1,)), yerr= list(np.array(var).reshape(-1,)), fmt =  'o', label = f'Test: {M_test.shape[0]} datapoints, ' 
-            + r'$R^2$ = ' + "{:1.3f}, ".format(r2_score(y_test, test_pred)) + "OME = {:1.4f}".format(OME(y_test, test_pred)))
-
-
-            plt.plot(np.linspace((min(yy)[0]), (max(yy)[0]), num = 2),np.linspace((min(yy)[0]), (max(yy)[0]), num = 2),'k-', zorder = 10)
-            plt.ylabel(r'$Log$ Viscosity (Poise) ML Predicted')
-            plt.xlabel(r'$Log$ Viscosity (Poise) Experimental Truth')
-            plt.legend(loc = 'upper left', frameon = False, prop={"size":8})
-            plt.title('GPR Parity Plot')
-            plt.xlim(-2, 12.5)
-            plt.ylim(-2, 12.5)
-            plt.gca().set_aspect('equal', adjustable='box')
-            plt.savefig(f'../MODELS/{datetime.date.today()}_{args.data_type}/GPR_parity_plot.png')
-        except:
-            print(f'GPR parity could not be made for {datetime.date.today()}_{args.data_type}')
-        
-        # test_pred, test_var, _ = predict_all_cv(PNN,[X_test, y_scaler.transform(M_scaler.inverse_transform(M_test)), S_torch_scaler.transform(np.power(10, S_scaler.inverse_transform(S_test)) - 0.00001), T_test, P_test], is_torch = True)
-        # train_pred, train_var, _ = predict_all_cv(PNN,[XX, y_scaler.transform(M_scaler.inverse_transform(M)), S_torch_scaler.transform(np.power(10, S_scaler.inverse_transform(S)) - 0.00001), T, P], is_torch = True)
-       
-        #With Scaling
-        try:
-            test_pred, test_var, _ = predict_all_cv(PNN,[X_test, y_scaler.transform(M_scaler.inverse_transform(M_test)), y_scaler.transform(S_scaler.inverse_transform(S_test)), T_test, P_test], is_torch = True)
-            train_pred, train_var, _ = predict_all_cv(PNN,[XX, y_scaler.transform(M_scaler.inverse_transform(M)), y_scaler.transform(S_scaler.inverse_transform(S)), T, P], is_torch = True)
-            test_pred = y_scaler.inverse_transform(np.array(test_pred).reshape(-1, 1))
-            train_pred = y_scaler.inverse_transform(np.array(train_pred).reshape(-1, 1))
-            test_var = y_scaler.inverse_transform(np.array(test_var).reshape(-1, 1) - 1) - y_scaler.data_min_
-            train_var = y_scaler.inverse_transform(np.array(train_var).reshape(-1, 1) -1) - y_scaler.data_min_
-        except:
-            print('Error in PIHN predictions.')
-            
-        #Without log Scaling
-        # test_pred, test_var, _ = predict_all_cv(PNN,[X_test, M_torch_scaler.transform(np.power(10, (M_scaler.inverse_transform(M_test)))), y_scaler.transform(S_scaler.inverse_transform(S_test)), T_test, P_test], is_torch = True)
-        # train_pred, train_var, _ = predict_all_cv(PNN,[XX, M_torch_scaler.transform(np.power(10, (M_scaler.inverse_transform(M)))), y_scaler.transform(S_scaler.inverse_transform(S)), T, P], is_torch = True)
-        # test_pred = y_scaler.inverse_transform(np.array(test_pred).reshape(-1, 1))
-        # train_pred = y_scaler.inverse_transform(np.array(train_pred).reshape(-1, 1))
-        # test_var = y_scaler.inverse_transform(np.array(test_var).reshape(-1, 1)) - y_scaler.data_min_
-        # train_var = y_scaler.inverse_transform(np.array(train_var).reshape(-1, 1)) - y_scaler.data_min_
-
-        train_df["PENN_Pred"] = train_pred
-        test_df["PENN_Pred"] = test_pred
-        train_df["PENN_Pred_var"] = train_var
-        test_df["PENN_Pred_var"] = test_var
-
-        plt.figure(figsize = (5.5,5.5))
-        plt.errorbar(yy, list(train_pred.reshape(-1,)), yerr = list(np.array(train_var).reshape(-1,)), c = 'orange', fmt = 'o', label = f'Train: {M.shape[0]} datapoints, ' 
-        + r'$R^2$ = ' + "{:1.3f}, ".format(r2_score(yy, train_pred)) + "OME = {:1.4f}".format(get_CV_error(PNN_cv, scaler= y_scaler)))
-
-        plt.errorbar(y_test , list(test_pred.reshape(-1,)), yerr= list(np.array(test_var).reshape(-1,)), fmt =  'o', label = f'Test: {M_test.shape[0]} datapoints, ' 
-        + r'$R^2$ = ' + "{:1.3f}, ".format(r2_score(y_test, test_pred)) + "OME = {:1.4f}".format(OME(y_test, test_pred)))
-
-        plt.plot(np.linspace((min(yy)[0]), (max(yy)[0]), num = 2),np.linspace((min(yy)[0]), (max(yy)[0]), num = 2),'k-', zorder = 10)
-        plt.ylabel(r'$Log$ Viscosity (Poise) ML Predicted')
-        plt.xlabel(r'$Log$ Viscosity (Poise) Experimental Truth')
-        plt.legend(loc = 'upper left', frameon = False, prop={"size":8})
-        plt.title('PNN Parity Plot')
-        plt.xlim(-2, 12.5)
-        plt.ylim(-2, 12.5)
-        plt.gca().set_aspect('equal', adjustable='box')
-        
-        plt.savefig(f'../MODELS/{datetime.date.today()}_{args.data_type}/PNN_parity_plot.png')
-        val_epochs(PNN_hist, name = 'PNN', scaler = y_scaler, save = True, d_type= args.data_type)
-    #################################################################################
-
-    train_df.to_pickle(f'../MODELS/{datetime.date.today()}_{args.data_type}/train_evals.pkl')
-    test_df.to_pickle(f'../MODELS/{datetime.date.today()}_{args.data_type}/test_evals.pkl')
-        
-def crossval_compare(NN_models, XX, yy, M, S, T, P, data = None, custom = False, verbose = 1, random_state = None, epochs = 500, gpr_model = None, save = True, train_type = 'split', scalers = None):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(device)
-    start_total = time.time()
 
-    M_scaler = scalers["M"]
-    S_scaler = scalers["S"]
-    y_scaler = scalers["y"]
-    T_scaler = scalers["T"]
-    S_torch_scaler = scalers["s_torch"]
-    M_torch_scaler = scalers["m_torch"]
-    kf = StratifiedKFold(n_splits=10, shuffle = True, random_state = random_state)
-    NN = [[] for i in range(len(NN_models))]
-    gpr = []
-    PNN = []
-    PNN_CV = []
-    PNN_hist = []
-    NN_cv = [[] for i in range(len(NN_models))]
-    gp_cv = []
-    hist = [[] for i in range(len(NN_models))]
-    HPs = [[] for i in range(len(NN_models))]
-    PENN_hyperparams = []
-    fold_num = 0
-    path = '../'
-    for train_index, test_index in kf.split(XX, np.where(S == 0,0,1)):
-        X_train, X_val = XX[train_index], XX[test_index]
-        y_train, y_val = yy[train_index], yy[test_index]
-        M_train, M_val = M[train_index], M[test_index]
-        S_train, S_val = S[train_index], S[test_index]
-        T_train, T_val = T[train_index], T[test_index]
-        P_train, P_val = P[train_index], P[test_index]
-        n_features = X_train.shape[1]
-        
-        fit_in = [X_train, M_train, S_train, T_train, P_train]
-        eval_in = [X_val, M_val, S_val, T_val, P_val]
-        
-        #KERAS NN TUNING
-        if True:
-            for i in range(len(NN_models)): 
-                #Hyperparam Tuning
-                hyper_params = hyperparam_opt(ViscNN_concat_HP, fit_in, eval_in, y_train, y_val, fold_num, train_type)
-                HPs[i].append(hyper_params.values)
-                print(f'hyperparams',hyper_params.values)
-                NN[i].append(NN_models[i](n_features, hyper_params)) #S_trans.inverse_transform(S_scaler.inverse_transform(S_train))
-            for i in range(len(NN_models)): 
-                s = time.time()
-                hist[i].append(NN[i][-1].fit(fit_in, y_train, epochs=epochs, batch_size=20, validation_data = (eval_in, y_val) ,verbose=0))
-                print(f'{NN_models[i].__name__} train time = {time.time() - s}')
-                NN_cv[i].append(OME(y_val, NN[i][-1].predict(eval_in)))      
-                plt.figure()
-                plt.scatter(y_val, NN[i][-1].predict(eval_in))
-                plt.xlim(-1, 1)
-                plt.ylim(-1, 1)
-                plt.gca().set_aspect('equal', adjustable='box')
-                plt.plot([-1,1], [-1,1], 'k')
-                os.makedirs(path + f'MODELS/{datetime.date.today()}_{train_type}/ANN', exist_ok = True)
-                plt.savefig(path +f'MODELS/{datetime.date.today()}_{train_type}/ANN/cv_{fold_num}_parity.png')
-            #TORCH NN TUNING
-            #With scaling
-            # fit_in = [X_train, M_train, S_train, T_train, P_train]
-            # eval_in = [X_val, M_val, S_val, T_val, P_val]
-            fit_in = [X_train, y_scaler.transform(M_scaler.inverse_transform(M_train)), y_scaler.transform(S_scaler.inverse_transform(S_train)), T_train, P_train]
-            eval_in = [X_val, y_scaler.transform(M_scaler.inverse_transform(M_val)), y_scaler.transform(S_scaler.inverse_transform(S_val)), T_val, P_val]
-            
+    global args
+    args = parser.parse_args()
+    file = args.config
+    with open(file) as f:
+        config = yaml.safe_load(f)
 
-            print(max(fit_in[1]), min(fit_in[2]), max(fit_in[3]))
-            fit_ten = [torch.tensor(a).to(device).float() for a in fit_in]
-            val_ten = [torch.tensor(a).to(device).float() for a in eval_in]
-            tr_load = DataLoader(MVDataset(*fit_ten, torch.tensor(y_train).to(device).float()), batch_size = 20, shuffle = True)
-            val_load = DataLoader(MVDataset(*val_ten, torch.tensor(y_val).to(device).float()), batch_size = 20, shuffle = True) 
-
-            best_config = hyperparam_opt_ray(n_features, tr_load, val_load, device)
-            print('Best Configuration from RayTune ', best_config)
-            model, train_loss, val_loss = run_training(best_config, n_fp = n_features,train_loader = tr_load, test_loader = val_load, device = device, EPOCHS = 200)
-            PNN.append(model)
-            PENN_hyperparams.append(best_config)
-            PNN_hist.append(val_loss)
-            val_pred = model(*val_ten).cpu().detach().numpy()
-            print(type(model))
-            PNN_CV.append(OME(y_val, val_pred))
-            plt.figure()
-            plt.scatter(y_val, val_pred)
-            plt.xlim(-1, 1)
-            plt.ylim(-1, 1)
-            plt.gca().set_aspect('equal', adjustable='box')
-            plt.plot([-1,1], [-1,1], 'k')
-            os.makedirs(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN', exist_ok = True)
-            plt.savefig(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/cv_{fold_num}_parity.png')
-
-            fit_in = [X_train, M_train, S_train, T_train, P_train]
-            eval_in = [X_val, M_val, S_val, T_val, P_val]
-        #GPR MODEL TRAINING
-        if gpr_model:
-            X_train_ = np.concatenate((X_train, M_train, S_train, T_train, P_train), axis = 1)
-            X_test_ = np.concatenate((X_val, M_val, S_val, T_val, P_val), axis = 1)
-            s = time.time()
-            gpr.append(gpr_model(X_train_, y_train))
-            print(f'GPR train time = {time.time() - s}')
-            m = gpr[-1]
-            mean, var = m.predict_y(X_test_)
-            gp_cv.append(OME(y_val, mean))
-            plt.figure()
-            plt.scatter(y_val, mean)
-            plt.xlim(-1, 1)
-            plt.ylim(-1, 1)
-            plt.gca().set_aspect('equal', adjustable='box')
-            plt.plot([-1,1], [-1,1], 'k')
-            os.makedirs(path+f'MODELS/{datetime.date.today()}_{train_type}/GPR', exist_ok = True)
-            plt.savefig(path+f'MODELS/{datetime.date.today()}_{train_type}/GPR/cv_{fold_num}_parity.png')
-
-        if verbose > 0:
-            #print('MSE: %.3f, RMSE: %.3f' % (error[-1], np.sqrt(error[-1])))
-            print('Trained fold ' + str(len(hist[-1])) + ' ...')
-            for i in range(len(NN_models)):
-                print('MSE CV Error ' + NN_models[i].__name__ + ': ' + str(hist[i][-1].history['val_loss'][-1]))
-                print('OME CV Error ' + NN_models[i].__name__ + ': ' + str(NN_cv[i][-1]))
-            if gpr_model: print('OME CV Error GPR: ' + str(gp_cv[-1]))
-        fold_num += 1
-    #if verbose > 0:
-        #print('CV MSE error:' + str(np.mean(error)))
-    print(f'Overall CV time = {time.time() - start_total}')
+    for key in config:
+        for k, v in config[key].items():
+            setattr(args, k, v)
     
-    #save models
-    if save:
-        print('Saving models...')
-        for i in range(len(NN_models)):
-            for n in range(len(NN[i])):
-                NN[i][n].save(path +f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/model_{n}')
-                np.save(path +f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/hist_{n}',hist[i][n].history)
-                try:
-                    with open(path+f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/model_{n}_hp.json', 'w') as fp:
-                        json.dump(HPs[i][n], fp)
-                    fp.close()
-                except:
-                    print('Could not print to json.')
-            print(f'Saved ANN_{i}')
-            np.save(path+f'MODELS/{datetime.date.today()}_{train_type}/{NN_models[i].__name__}/OME_CV', np.array(NN_cv[i]))
-        for i in range(len(PNN)):
-            torch.save(PNN[i].state_dict(), path + f'MODELS/{datetime.date.today()}_{train_type}/PNN/model_{i}.pt')
-            np.save(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/OME_CV', np.array(PNN_CV))
-            with open(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/hyperparam_{i}.json', "w") as file:
-                json.dump(PENN_hyperparams[i], file)
-            print(f'Saved PNN_{i}')
-        with open(path+f'MODELS/{datetime.date.today()}_{train_type}/PNN/n_features.pickle', 'wb') as file:
-            pickle.dump(n_features, file)
-        for i in range(len(gpr)):
-            gpr[i].predict_f_compiled = tf.function(gpr[i].predict_f, input_signature=[tf.TensorSpec(shape=[None, X_train_.shape[1]], dtype=tf.float64)])
-            tf.saved_model.save(gpr[i], path+f'MODELS/{datetime.date.today()}_{train_type}/GPR/model_{i}')
-            print(path +f'Saved GPR_{i}')
-        np.save(path + f'MODELS/{datetime.date.today()}_{train_type}/GPR/OME_CV', np.array(gp_cv))
-        print('saved models')
-    return NN, hist, gpr, gp_cv, NN_cv, PNN, PNN_CV, PNN_hist
+    # Initialize Models to test
+    # kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale_bounds=(1e-2, 1e2))
+    # gpr = GaussianProcessRegressor(kernel = kernel, n_restarts_optimizer=20)
 
-if __name__ == '__main__':
-    main()
+    # Initialize the GPflow regressor with the RBF kernel
+    # kernel = gpflow.kernels.RBF()
+    # gpr = GPflowRegressor(kernel=kernel)
+    
+
+    training_name = "training_shear_split_1"
+    models = [#GPRModel(name = 'GPR', model_obj= HyperParam_GPR()),
+    # PENNModel(name = training_name + '_ANN', model_obj=Visc_ANN,
+    #                                         device = device, lr = 1e-3, epochs = 1000, batch_size = 8, 
+    #                                         reduce_lr_factor = 0.5),
+    # PENNModel(name = training_name + '_PENN_WLF_Hybrid', model_obj=Visc_PENN_WLF_Hybrid, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
+                                                                            # reduce_lr_factor = 0.5, apply_gradnorm = False),
+    PENNModel(name = training_name + '_PENN_WLF', model_obj=Visc_PENN_WLF, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
+                                                                            reduce_lr_factor = 0.5, apply_gradnorm = False),
+    # PENNModel(name = training_name +'_PENN_WLF_SP', model_obj=Visc_PENN_WLF_SP, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
+    #                                                                         reduce_lr_factor = 0.5, apply_gradnorm = False),
+    PENNModel(name = training_name +'_PENN_Arrhenius', model_obj=Visc_PENN_Arrhenius, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
+                                                                            reduce_lr_factor = 0.5, apply_gradnorm = False),]
+    # PENNModel(name = training_name +'_PENN_Arrhenius_SP', model_obj=Visc_PENN_Arrhenius_SP, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
+    #                                                                         reduce_lr_factor = 0.5, apply_gradnorm = False),]
+    #   PENNModel(name = training_name +'_PENN_PI_WLF_gradnorm', model_obj=Visc_PENN_PI_WLF, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
+    #                                                                         reduce_lr_factor = 0.5, apply_gradnorm = True)]
+    #PENNModel(name = 'PENN_PI_Arrhenius_lr1e-5_b8', model_obj=Visc_PENN_PI_Arrhenius, device = device, lr = 1e-5, epochs = 200, batch_size = 8),
+    #PENNModel(name = 'PENN_WLF_SP_lr1e-5_b8', model_obj=Visc_PENN_WLF_SP, device = device, lr = 1e-5, epochs = 200, batch_size = 8),]
+
+    trainer = ModelTrainer(training_name,args, models, data_split_type='polyphysics')
+
+    trainer.train_models()

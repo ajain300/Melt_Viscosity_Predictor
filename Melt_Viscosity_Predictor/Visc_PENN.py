@@ -6,6 +6,7 @@
 
 import torch
 import torch.nn as nn
+from enum import Enum
 from utils.train_torch import LossTypes
 from utils.train_utils import EarlyStopping
 from utils.gradnorm import GradNorm
@@ -13,6 +14,23 @@ import os
 from torchviz import make_dot
 import wandb
 
+['a1', 'a2', 'M_cr', 'k_1', 'c1', 'c2', 'Tr','tau', 'n', 'eta_0']
+class Visc_Constants(Enum):
+    a1 = 'alpha_1'
+    a2 = 'alpha_2'
+    k1 = 'k_1'
+    k2 = 'k_2'
+    kcr = 'k_cr'
+    Mcr = 'M_cr'
+    c1 = 'C1'
+    c2 = 'C2'
+    Tr = 'T_r'
+    Scr = 'S_cr'
+    n = 'n'
+    beta_M = 'Beta_Mw'
+    beta_shear = 'Beta_Shear'
+    lnA = 'lnA'
+    EaR = 'EaR'
 class Visc_PENN_Base(nn.Module):
     def __init__(self, n_fp, config,device, apply_gradnorm = False, n_params = 11, **kwargs):
         '''
@@ -27,6 +45,7 @@ class Visc_PENN_Base(nn.Module):
         self.config = config
         self.device = device
         self.mlp = MLP_PENN(n_fp, config = config, latent_param_size= n_params).to(self.device)
+        self.rel = nn.ReLU()
         self.sig = nn.Sigmoid()
         self.soft = nn.Softplus()
         self.tanh = nn.Tanh()
@@ -55,26 +74,9 @@ class Visc_PENN_Base(nn.Module):
         # Mini-batch training
 
         for batch_idx, (XX, M, S, T, P, visc) in enumerate(dataloader):
-            # print(type(data))
-            # print(len(data))
-            # print("label shape",data[1].shape)
-            # print("input shape",data[0].shape)
-            #with torch.autograd.detect_anomaly():
-                
-            # if torch.isnan(out).any():
-            #     # print('invalid out')
-            #     # nan_idx = (torch.isnan(out)==1).nonzero(as_tuple=True)
-            #     # print(M[nan_idx], S[nan_idx], T[nan_idx])
-            #     break
+
             optimizer.zero_grad()
             
-            # out, a1,a2 = self.forward(XX, M, S, T, P, train = True)
-            # loss = criterion(out, visc)
-            # a1_loss = config["a_weight"]*criterion(a1, torch.ones_like(a1).to(device)*torch.tensor(1).to(device))
-            # a2_loss = config["a_weight"]*criterion(a2, torch.ones_like(a2)*torch.tensor(3.4).to(device)) 
-            # loss = loss + a2_loss + a1_loss
-            
-            # run the train step and get the loss information
             step_losses = self.train_step(XX, M, S, T, P, visc, criterion, optimizer)
 
             if self.run:
@@ -141,10 +143,10 @@ class Visc_PENN_Base(nn.Module):
         }
         torch.save(checkpoint, save_path)
 
-        if self.grad_norm is not None:
-            dir_path = os.path.dirname(save_path)
-            self.grad_norm.plot_gradnorm_stats(os.path.join(dir_path, "gradnorm.png"))
-            print(f"SAVED GRADNORM at {os.path.join(dir_path, 'gradnorm.png')}")
+        # if self.grad_norm is not None:
+        #     dir_path = os.path.dirname(save_path)
+        #     self.grad_norm.plot_gradnorm_stats(os.path.join(dir_path, "gradnorm.png"))
+        #     print(f"SAVED GRADNORM at {os.path.join(dir_path, 'gradnorm.png')}")
 
     def load_checkpoint(self, load_path, optimizer, scheduler):
         """
@@ -255,7 +257,6 @@ class Visc_ANN(Visc_PENN_Base):
         optimizer.step()
         return {LossTypes.tot_train.value : loss}
 
-
 class Visc_PENN_WLF(Visc_PENN_Base):
     def forward(self, fp, M, S, T, PDI, train:bool = False, get_constants:bool = False):
         """
@@ -278,8 +279,115 @@ class Visc_PENN_WLF(Visc_PENN_Base):
         params = self.mlp(fp, PDI)
         self.alpha_1 = self.sig(params[:,0])*torch.tensor(3).to(self.device)
         self.alpha_2 = self.sig(params[:,1])*torch.tensor(6).to(self.device)
-        self.k_1 = self.tanh(params[:,2]) - torch.tensor(0.5).to(self.device)
-        self.beta_M = torch.tensor(10).to(self.device) + self.sig(params[:,3])*torch.tensor(30).to(self.device)
+        self.k_1 = torch.tensor(2).to(self.device) * self.tanh(params[:,2]) - torch.tensor(1.0).to(self.device)
+        self.beta_M = torch.tensor(20).to(self.device) + self.sig(params[:,3])*torch.tensor(40).to(self.device)
+        self.M_cr = self.tanh(params[:,4])
+        self.C_1 = self.sig(params[:,5])*torch.tensor(2).to(self.device)
+        self.C_2 = self.sig(params[:,6])*torch.tensor(2).to(self.device)
+        self.T_r = self.tanh(params[:,7]) - 1.0
+        self.n = self.sig(params[:,8])
+        self.crit_shear = self.tanh(params[:,9])
+        self.beta_shear = torch.tensor(10).to(self.device) + self.sig(params[:,10])*torch.tensor(30).to(self.device)
+        
+        #Temp
+        t_shift = T - self.T_r
+        num = -self.C_1 * t_shift
+        den = self.C_2 + t_shift
+        a_t = num/den
+
+        if (a_t > 2).any():
+            print('caught invalid temp shift')
+            filter_idx = (a_t > 2).nonzero(as_tuple=True)
+            for i in filter_idx:
+                print('C1', self.C_1[i], 'C2', self.C_2[i], 'T_r',self.T_r[i], 'T', T[i], 'T_shift', t_shift[i] )
+        
+        #NEW
+        eta_0 = self.Mw_layer(M, self.alpha_1, self.alpha_2, self.beta_M, self.M_cr, self.k_1 + a_t)
+        eta = self.Shear_layer(S, eta_0, self.n, self.beta_shear, self.crit_shear)
+
+        eta = torch.unsqueeze(eta, -1)
+
+        if torch.isnan(eta).any():
+            print('invalid out')
+            nan_idx = (torch.isnan(eta)==1).nonzero(as_tuple=True)
+            for i in nan_idx:
+                print('Mcr', self.M_cr[i],'a2-a1' ,(self.alpha_2 - self.alpha_1)[i], 'crit_shear', self.crit_shear[i],
+                'S', S, 'M', M, 'T', T)
+
+        if train:
+            return eta, self.alpha_1, self.alpha_2
+        elif get_constants:
+            return {Visc_Constants.a1.value : self.alpha_1, 
+                    Visc_Constants.a2.value :    self.alpha_2, 
+                    Visc_Constants.Mcr.value :    self.M_cr, 
+                    Visc_Constants.k1.value :    self.k_1, 
+                    Visc_Constants.c1.value :    self.C_1, 
+                    Visc_Constants.c2.value :    self.C_2, 
+                    Visc_Constants.Tr.value :    self.T_r,
+                    Visc_Constants.Scr.value :    self.crit_shear, 
+                    Visc_Constants.n.value :    self.n,
+                    Visc_Constants.beta_M.value :    self.beta_M,
+                    Visc_Constants.beta_shear.value :    self.beta_shear}
+        else:
+            return eta
+
+class Visc_PENN_WLF_Hybrid(Visc_PENN_Base):
+    def __init__(self, n_fp, config,device, apply_gradnorm = False, n_params = 11, **kwargs):
+        '''
+        :param n_fp (int): input fingerprint dimension
+        :param config (dict): configurations for hyperparameters for the MLP
+        :param device: device, either cuda:X or cpu
+        '''
+        super(Visc_PENN_Base, self).__init__()
+
+        self.training_complete = False
+
+        self.config = config
+        self.device = device
+        self.mlp = MLP_PENN(n_fp, config = config, latent_param_size= n_params).to(self.device)
+        self.sig = nn.Sigmoid()
+        self.soft = nn.Softplus()
+        self.tanh = nn.Tanh()
+        self.Mw_layer = MolWeight(device)
+        self.Shear_layer = ShearRate_softplus(device)
+        self.losses = []
+        self.fold = kwargs.get("fold", None)
+        self.run =kwargs.get("run", None)
+        self.early_stopping = EarlyStopping()
+
+        for param in self.mlp.parameters():
+            param.requires_grad = True
+        
+        if apply_gradnorm:
+            print("Initialize gradnorm.")
+            self.grad_norm = GradNorm(layer=self.mlp.out, alpha = 2.5,lr2 = 1.0,device = device, log= True)
+            self.mlp.out.register_full_backward_hook(self.grad_norm.gradNorm_layer)
+        else:
+            self.grad_norm = None
+    
+    def forward(self, fp, M, S, T, PDI, train:bool = False, get_constants:bool = False):
+        """
+        Performs a forward pass through the PENN
+        
+        :param fp: The fingerprint vector of size n_fp
+        :param M: The scaled log mol. weight of the polymer melt
+        :param S: The scaled shear rate of the polymer melt 
+        :param T: The scaled temperature of the polymer melt
+        :param PDI: The scaled polydispersity index of the polymer melt
+        :param train (bool): If its set to true
+        A boolean parameter that indicates whether the forward pass is being performed during training or not. 
+        If set to True, it returns all quantities that are needed for the loss calculation. In this case its the calcualted eta, alpha_1, and alpha_2
+        :param get_constants (bool): Boolean flag that indicates whether or not to return the empirical constants calculated by the
+        forward pass of the MLP. defaults to False (optional)
+        """
+        eta = None
+        
+        M, S, T = torch.squeeze(M), torch.squeeze(S), torch.squeeze(T)
+        params = self.mlp(fp, PDI)
+        self.alpha_1 = self.sig(params[:,0])*torch.tensor(3).to(self.device)
+        self.alpha_2 = self.sig(params[:,1])*torch.tensor(6).to(self.device)
+        self.k_1 = torch.tensor(2).to(self.device) * self.tanh(params[:,2]) - torch.tensor(1.0).to(self.device)
+        self.beta_M = torch.tensor(20).to(self.device) + self.sig(params[:,3])*torch.tensor(40).to(self.device)
         self.M_cr = self.tanh(params[:,4])
         self.C_1 = self.sig(params[:,5])*torch.tensor(2).to(self.device)
         self.C_2 = self.sig(params[:,6])*torch.tensor(2).to(self.device)
@@ -316,12 +424,22 @@ class Visc_PENN_WLF(Visc_PENN_Base):
         if train:
             return eta, self.alpha_1, self.alpha_2
         elif get_constants:
-            return eta, self.alpha_1, self.alpha_2, self.M_cr, self.k_1, self.C_1, self.C_2, self.T_r, self.crit_shear, self.n, eta_0
+            return {Visc_Constants.a1.value : self.alpha_1, 
+                    Visc_Constants.a2.value :    self.alpha_2, 
+                    Visc_Constants.Mcr.value :    self.M_cr, 
+                    Visc_Constants.k1.value :    self.k_1, 
+                    Visc_Constants.c1.value :    self.C_1, 
+                    Visc_Constants.c2.value :    self.C_2, 
+                    Visc_Constants.Tr.value :    self.T_r,
+                    Visc_Constants.Scr.value :    self.crit_shear, 
+                    Visc_Constants.n.value :    self.n,
+                    Visc_Constants.beta_M.value :    self.beta_M,
+                    Visc_Constants.beta_shear.value :    self.beta_shear}
         else:
             return eta
 
 class Visc_PENN_WLF_SP(Visc_PENN_Base):
-    def __init__(self, n_fp, config,device, apply_gradnorm = False, n_params = 11):
+    def __init__(self, n_fp, config,device, apply_gradnorm = False, n_params = 11, **kwargs):
         '''
         :param n_fp (int): input fingerprint dimension
         :param config (dict): configurations for hyperparameters for the MLP
@@ -338,6 +456,11 @@ class Visc_PENN_WLF_SP(Visc_PENN_Base):
         self.Mw_layer = MolWeight_softplus(device)
         self.Shear_layer = ShearRate_softplus(device)
         self.losses = []
+        self.fold = kwargs.get("fold", None)
+        self.run =kwargs.get("run", None)
+        self.early_stopping = EarlyStopping()
+        self.training_complete = False
+
         for param in self.mlp.parameters():
             param.requires_grad = True
         
@@ -394,7 +517,7 @@ class Visc_PENN_WLF_SP(Visc_PENN_Base):
         
         #NEW
         eta_0 = self.Mw_layer(M, self.alpha_1, self.alpha_2, self.beta_M, self.M_cr, self.k_cr + a_t)
-        eta, S_sc = self.Shear_layer(S, eta_0, self.n, self.beta_shear, self.crit_shear)
+        eta = self.Shear_layer(S, eta_0, self.n, self.beta_shear, self.crit_shear)
 
         eta = torch.unsqueeze(eta, -1)
 
@@ -408,7 +531,119 @@ class Visc_PENN_WLF_SP(Visc_PENN_Base):
         if train:
             return eta, self.alpha_1, self.alpha_2
         elif get_constants:
-            return eta, self.alpha_1, self.alpha_2, self.M_cr, self.k_cr, self.C_1, self.C_2, self.T_r, self.crit_shear, self.n, eta_0
+            return {Visc_Constants.a1.value : self.alpha_1, 
+                    Visc_Constants.a2.value :    self.alpha_2, 
+                    Visc_Constants.Mcr.value :    self.M_cr, 
+                    Visc_Constants.kcr.value :    self.k_cr, 
+                    Visc_Constants.c1.value :    self.C_1, 
+                    Visc_Constants.c2.value :    self.C_2, 
+                    Visc_Constants.Tr.value :    self.T_r,
+                    Visc_Constants.Scr.value :    self.crit_shear, 
+                    Visc_Constants.n.value :    self.n,
+                    Visc_Constants.beta_M.value :    self.beta_M,
+                    Visc_Constants.beta_shear.value :    self.beta_shear}
+        else:
+            return eta
+
+class Visc_PENN_Arrhenius_SP(Visc_PENN_Base):
+    def __init__(self, n_fp, config,device, apply_gradnorm = False, n_params = 10, **kwargs):
+        '''
+        :param n_fp (int): input fingerprint dimension
+        :param config (dict): configurations for hyperparameters for the MLP
+        :param device: device, either cuda:X or cpu
+        '''
+        super(Visc_PENN_Base, self).__init__()
+
+        self.config = config
+        self.device = device
+        self.mlp = MLP_PENN(n_fp, config = config, latent_param_size= n_params).to(self.device)
+        self.sig = nn.Sigmoid()
+        self.soft = nn.Softplus()
+        self.tanh = nn.Tanh()
+        self.Mw_layer = MolWeight_softplus(device)
+        self.Shear_layer = ShearRate_softplus(device)
+        self.losses = []
+        self.fold = kwargs.get("fold", None)
+        self.run =kwargs.get("run", None)
+        self.early_stopping = EarlyStopping()
+        self.training_complete = False
+
+        for param in self.mlp.parameters():
+            param.requires_grad = True
+        
+        if apply_gradnorm:
+            print("Initialize gradnorm.")
+            self.grad_norm = GradNorm(layer=self.mlp.out, alpha = 2.5,lr2 = 10.0,device = device, log= True)
+            self.mlp.out.register_full_backward_hook(self.grad_norm.gradNorm_layer)
+        else:
+            self.grad_norm = None
+    
+    def forward(self, fp, M, S, T, PDI, train:bool = False, get_constants:bool = False):
+        """
+        Performs a forward pass through the PENN
+        
+        :param fp: The fingerprint vector of size n_fp
+        :param M: The scaled log mol. weight of the polymer melt
+        :param S: The scaled shear rate of the polymer melt 
+        :param T: The scaled temperature of the polymer melt
+        :param PDI: The scaled polydispersity index of the polymer melt
+        :param train (bool): If its set to true
+        A boolean parameter that indicates whether the forward pass is being performed during training or not. 
+        If set to True, it returns all quantities that are needed for the loss calculation. In this case its the calcualted eta, alpha_1, and alpha_2
+        :param get_constants (bool): Boolean flag that indicates whether or not to return the empirical constants calculated by the
+        forward pass of the MLP. defaults to False (optional)
+        """
+        eta = None
+        
+        M, S, T = torch.squeeze(M), torch.squeeze(S), torch.squeeze(T)
+        
+        params = self.mlp(fp, PDI)
+        self.alpha_1 = self.sig(params[:,0])*torch.tensor(3).to(self.device)
+        self.alpha_2 = self.sig(params[:,1])*torch.tensor(6).to(self.device)
+        self.k_cr = self.tanh(params[:,2])
+        self.beta_M = torch.tensor(10).to(self.device) + self.sig(params[:,3])*torch.tensor(30).to(self.device)
+        self.M_cr = self.tanh(params[:,4])
+        self.lnA = params[:,5]
+        self.EaR = params[:,6]
+        self.n = self.sig(params[:,7])
+        self.crit_shear = self.tanh(params[:,8])
+        self.beta_shear = self.sig(params[:,9])*torch.tensor(30).to(self.device)
+
+        #Temp
+        a_t = self.lnA + self.EaR*T
+
+        if (a_t > 2).any():
+            print('caught invalid temp shift')
+            filter_idx = (a_t > 2).nonzero(as_tuple=True)
+            for i in filter_idx:
+                print('C1', self.C_1[i], 'C2', self.C_2[i], 'T_r',self.T_r[i], 'T', T[i], 'T_shift', t_shift[i] )
+        
+        #NEW
+        eta_0 = self.Mw_layer(M, self.alpha_1, self.alpha_2, self.beta_M, self.M_cr, self.k_cr + a_t)
+        eta = self.Shear_layer(S, eta_0, self.n, self.beta_shear, self.crit_shear)
+
+        eta = torch.unsqueeze(eta, -1)
+
+        if torch.isnan(eta).any():
+            print('invalid out')
+            nan_idx = (torch.isnan(eta)==1).nonzero(as_tuple=True)
+            for i in nan_idx:
+                print('Mcr', self.M_cr[i],'a2-a1' ,(self.alpha_2 - self.alpha_1)[i], 'crit_shear', self.crit_shear[i],
+                'S', S, 'M', M, 'T', T, 'S_sc', S_sc)
+
+        if train:
+            return eta, self.alpha_1, self.alpha_2
+        elif get_constants:
+            return {Visc_Constants.a1.value : self.alpha_1, 
+                    Visc_Constants.a2.value :    self.alpha_2, 
+                    Visc_Constants.Mcr.value :    self.M_cr, 
+                    Visc_Constants.kcr.value :    self.k_cr, 
+                    Visc_Constants.lnA.value :    self.lnA, 
+                    Visc_Constants.EaR.value :    self.EaR, 
+                    Visc_Constants.Scr.value :    self.crit_shear, 
+                    Visc_Constants.n.value :    self.n,
+                    Visc_Constants.beta_M.value :    self.beta_M,
+                    Visc_Constants.beta_shear.value :    self.beta_shear}
         else:
             return eta
 
@@ -438,10 +673,10 @@ class Visc_PENN_Arrhenius(Visc_PENN_Base):
         self.beta_M = torch.tensor(10).to(self.device) + self.sig(params[:,3])*torch.tensor(30).to(self.device)
         self.M_cr = self.tanh(params[:,4])
         self.lnA = params[:,5]
-        self.EaR = params[:,6]
+        self.EaR = self.rel(params[:,7])
         self.n = self.sig(params[:,8])
         self.crit_shear = self.tanh(params[:,9])
-        self.beta_shear = self.sig(params[:,10])*torch.tensor(30).to(self.device)
+        self.beta_shear = torch.tensor(10).to(self.device) + self.sig(params[:,10])*torch.tensor(30).to(self.device)
         
         #Temp
         a_t = self.lnA + self.EaR*T
@@ -450,7 +685,7 @@ class Visc_PENN_Arrhenius(Visc_PENN_Base):
             print('caught invalid temp shift')
             filter_idx = (a_t > 2).nonzero(as_tuple=True)
             for i in filter_idx:
-                print('C1', self.C_1[i], 'C2', self.C_2[i], 'T_r',self.T_r[i], 'T', T[i], 'T_shift', a_t[i] )
+                print('lnA', self.lnA[i], 'EaR', self.EaR[i], 'T', T[i], 'T_shift', a_t[i])
         
         #NEW
         eta_0 = self.Mw_layer(M, self.alpha_1, self.alpha_2, self.beta_M, self.M_cr, self.k_1 + a_t)
@@ -468,7 +703,16 @@ class Visc_PENN_Arrhenius(Visc_PENN_Base):
         if train:
             return eta, self.alpha_1, self.alpha_2
         elif get_constants:
-            return eta, self.alpha_1, self.alpha_2, self.M_cr, self.k_1 + a_t, self.C_1, self.C_2, self.T_r, a_t + self.crit_shear, self.n, eta_0
+            return {Visc_Constants.a1.value : self.alpha_1, 
+                    Visc_Constants.a2.value :    self.alpha_2, 
+                    Visc_Constants.Mcr.value :    self.M_cr, 
+                    Visc_Constants.k1.value :    self.k_1, 
+                    Visc_Constants.lnA.value :    self.lnA, 
+                    Visc_Constants.EaR.value :    self.EaR, 
+                    Visc_Constants.Scr.value :    self.crit_shear, 
+                    Visc_Constants.n.value :    self.n,
+                    Visc_Constants.beta_M.value :    self.beta_M,
+                    Visc_Constants.beta_shear.value :    self.beta_shear}
         else:
             return eta
 
@@ -730,18 +974,16 @@ class MolWeight(nn.Module):
     def forward(self, M, alpha_1, alpha_2, beta, Mcr, k_1):        
         low_mw = k_1 + alpha_1*M
         k_2 = k_1 + (alpha_1 - alpha_2)*Mcr
-        high_mw = k_2 + (alpha_2 - alpha_1)*M
+        high_mw = k_2 + (alpha_2)*M
         high_weight = self.HS(beta, M-Mcr)
         low_weight = self.HS(beta, Mcr-M)
         f_M = low_mw*low_weight + high_mw*high_weight
         
-        if (f_M>2).any():
-            print('invalid out')
+        if (f_M>4).any():
+            print('invalid out in Mol weight func')
             nan_idx = (torch.isnan(f_M)>1).nonzero(as_tuple=True)
             print('a1', alpha_1, 'a2',alpha_2 ,'bM', beta, 'Mcr', Mcr, 'k_1', k_1, 'M', M, 'F(M)', f_M)
-        
-        #print('a1', alpha_1, 'a2',alpha_2 ,'bM', beta, 'Mcr', Mcr, 'kcr', kcr)        
-        
+                
         return f_M
 
 class ShearRate(nn.Module):
@@ -752,20 +994,26 @@ class ShearRate(nn.Module):
     
     def forward(self, S, eta_0, n, beta, Scr):
         #f_S = eta_0 - torch.pow(beta, -1)*(n)*(torch.log(torch.tensor(1).to(self.device) + torch.exp(torch.tensor(-1).to(self.device)*S_sc)) + S_sc)
+        print("shear S", S)
+        print("shear equ n", n)
+        print("shear equ crit_shear", Scr)
+        print("shear eta_0", eta_0)
         low_shear = eta_0 
         high_shear = eta_0 - n*(S-Scr)
         high_weight = self.HS(beta, S-Scr)
         low_weight = self.HS(beta, Scr-S)
+        print("shear high weight", high_weight)
         f_S = low_shear*low_weight + high_shear*high_weight
 
         if torch.isnan(f_S).any():
-            print('invalid out')
+            print('invalid out in shear rate func')
             nan_idx = (torch.isnan(f_S)==1).nonzero(as_tuple=True)
             for i in nan_idx:
                 print('eta0', eta_0[i], 'n',n[i], 'bshear', beta[i], 'crit_shear', Scr[i])
-        if (eta_0>2).any():
-            print('eta0', eta_0, 'n',n, 'bshear', beta, 'crit_shear', Scr)
+        # if (eta_0>2).any():
+        #     print('eta0', eta_0, 'n',n, 'bshear', beta, 'crit_shear', Scr)
         
+        print(f_S)
         return f_S
 
 class HeavySide(nn.Module):
@@ -774,6 +1022,7 @@ class HeavySide(nn.Module):
         self.device = device
     
     def forward(self, beta, x):
+        beta = torch.tensor(50).to(self.device)
         return 1 / (1+ torch.exp(-beta*x))
 
 class MolWeight_softplus(nn.Module):
@@ -799,8 +1048,7 @@ class ShearRate_softplus(nn.Module):
         super(ShearRate_softplus, self).__init__()
         self.device = device
     
-    def forward(self, S, eta_0, n, beta, tau):
-        Scr = tau
+    def forward(self, S, eta_0, n, beta, Scr):
         S_sc = beta*(S - Scr)
         f_S = eta_0 - torch.pow(beta, -1)*(n)*(torch.log(torch.tensor(1).to(self.device) + torch.exp(torch.tensor(-1).to(self.device)*S_sc)) + S_sc)
         
@@ -808,9 +1056,9 @@ class ShearRate_softplus(nn.Module):
             print('invalid out')
             nan_idx = (torch.isnan(f_S)==1).nonzero(as_tuple=True)
             for i in nan_idx:
-                print('eta0', eta_0[i], 'n',n[i], 'bshear', beta[i], 'tau', tau[i])
+                print('eta0', eta_0[i], 'n',n[i], 'bshear', beta[i], 'Scr', Scr[i])
         if (eta_0>2).any():
-            print('eta0', eta_0, 'n',n, 'bshear', beta, 'tau', tau)
+            print('eta0', eta_0, 'n',n, 'bshear', beta, 'Scr', Scr)
         
         
-        return f_S, S_sc
+        return f_S
