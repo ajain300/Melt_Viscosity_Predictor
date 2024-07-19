@@ -14,7 +14,6 @@ import os
 from torchviz import make_dot
 import wandb
 
-['a1', 'a2', 'M_cr', 'k_1', 'c1', 'c2', 'Tr','tau', 'n', 'eta_0']
 class Visc_Constants(Enum):
     a1 = 'alpha_1'
     a2 = 'alpha_2'
@@ -281,12 +280,12 @@ class Visc_PENN_WLF(Visc_PENN_Base):
         self.alpha_2 = self.sig(params[:,1])*torch.tensor(6).to(self.device)
         self.k_1 = torch.tensor(2).to(self.device) * self.tanh(params[:,2]) - torch.tensor(1.0).to(self.device)
         self.beta_M = torch.tensor(20).to(self.device) + self.sig(params[:,3])*torch.tensor(40).to(self.device)
-        self.M_cr = self.tanh(params[:,4])
+        self.M_cr = self.tanh(params[:,4])*torch.tensor(0.5).to(self.device)
         self.C_1 = self.sig(params[:,5])*torch.tensor(2).to(self.device)
         self.C_2 = self.sig(params[:,6])*torch.tensor(2).to(self.device)
         self.T_r = self.tanh(params[:,7]) - 1.0
         self.n = self.sig(params[:,8])
-        self.crit_shear = self.tanh(params[:,9])
+        self.crit_shear = self.sig(params[:,9] * torch.tensor(5.0).to(self.device)) - torch.tensor(1.0).to(self.device)
         self.beta_shear = torch.tensor(10).to(self.device) + self.sig(params[:,10])*torch.tensor(30).to(self.device)
         
         #Temp
@@ -675,7 +674,7 @@ class Visc_PENN_Arrhenius(Visc_PENN_Base):
         self.lnA = params[:,5]
         self.EaR = self.rel(params[:,7])
         self.n = self.sig(params[:,8])
-        self.crit_shear = self.tanh(params[:,9])
+        self.crit_shear = self.sig(params[:,9] * torch.tensor(5.0).to(self.device))  - torch.tensor(1.0).to(self.device)
         self.beta_shear = torch.tensor(10).to(self.device) + self.sig(params[:,10])*torch.tensor(30).to(self.device)
         
         #Temp
@@ -971,7 +970,7 @@ class MolWeight(nn.Module):
         self.device = device
         self.HS = HeavySide(device)
     
-    def forward(self, M, alpha_1, alpha_2, beta, Mcr, k_1):        
+    def forward(self, M, alpha_1, alpha_2, beta, Mcr, k_1):
         low_mw = k_1 + alpha_1*M
         k_2 = k_1 + (alpha_1 - alpha_2)*Mcr
         high_mw = k_2 + (alpha_2)*M
@@ -994,15 +993,16 @@ class ShearRate(nn.Module):
     
     def forward(self, S, eta_0, n, beta, Scr):
         #f_S = eta_0 - torch.pow(beta, -1)*(n)*(torch.log(torch.tensor(1).to(self.device) + torch.exp(torch.tensor(-1).to(self.device)*S_sc)) + S_sc)
-        print("shear S", S)
-        print("shear equ n", n)
-        print("shear equ crit_shear", Scr)
-        print("shear eta_0", eta_0)
+        # print("shear S", S)
+        #print("shear equ n", n)
+        #print("shear equ crit_shear", Scr)
+        #print("shear eta_0", eta_0)
+        beta = torch.tensor(30).to(self.device)
         low_shear = eta_0 
         high_shear = eta_0 - n*(S-Scr)
         high_weight = self.HS(beta, S-Scr)
         low_weight = self.HS(beta, Scr-S)
-        print("shear high weight", high_weight)
+        # print("shear high weight", high_weight)
         f_S = low_shear*low_weight + high_shear*high_weight
 
         if torch.isnan(f_S).any():
@@ -1013,7 +1013,7 @@ class ShearRate(nn.Module):
         # if (eta_0>2).any():
         #     print('eta0', eta_0, 'n',n, 'bshear', beta, 'crit_shear', Scr)
         
-        print(f_S)
+        # print(f_S)
         return f_S
 
 class HeavySide(nn.Module):
@@ -1022,7 +1022,6 @@ class HeavySide(nn.Module):
         self.device = device
     
     def forward(self, beta, x):
-        beta = torch.tensor(50).to(self.device)
         return 1 / (1+ torch.exp(-beta*x))
 
 class MolWeight_softplus(nn.Module):

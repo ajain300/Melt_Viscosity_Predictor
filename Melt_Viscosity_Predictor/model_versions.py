@@ -30,6 +30,7 @@ import json
 import pickle
 import contextlib
 import io
+from typing import Dict
 
 MODEL_FOLDER = "model_fold"
 
@@ -44,7 +45,7 @@ class BaseModel:
         self.train_history = [None] * n_splits
         self.cv_fold_validation_OME = [None] * n_splits
 
-    def set_scalers(self, scalers : dict):
+    def set_scalers(self, scalers : Dict[str, MinMaxScaler]):
         self.scalers = scalers
 
     def set_path(self, model_path : str):
@@ -151,10 +152,8 @@ class BaseModel:
         raise NotImplementedError("Method 'predict_cv' must be implemented in subclasses")
 
     def inference(self, df, df_fp):
-        print("inference df", df_fp)
         fp, M, S, T, P = self.transform_data(df, df_fp, train_data=False)
-        print("Test fp + PDI in",fp, P)
-        pred_mean, pred_std = self.predict_cv([fp, M, S, T, P])
+        pred_mean, pred_std = self.predict_cv([fp, M, S, T, P], S = S, M= M)
         pred_mean_scaled = self.scalers[FeatureHeaders.visc.value].inverse_transform(pred_mean)
         pred_std_scaled = pred_mean_scaled - self.scalers[FeatureHeaders.visc.value].inverse_transform(pred_mean-pred_std)
         return pred_mean_scaled, pred_std_scaled
@@ -175,8 +174,6 @@ class BaseModel:
 
         plt.errorbar(y_test , list(test_pred.reshape(-1,)), yerr= list(np.array(test_var).reshape(-1,)), fmt =  'o', label = f'Test: {y_test.shape[0]} datapoints, ' 
         + r'$R^2$ = ' + "{:1.3f}, ".format(r2_score(y_test, test_pred)) + "OME = {:1.4f}".format(OME(y_test, test_pred)))
-
-        print(test_pred)
 
         axis_min = min(y_test.min(), (test_pred - test_var).min())
         axis_max = min(y_test.max(), (test_pred + test_var).max())
@@ -359,17 +356,21 @@ class ANNModel(BaseModel):
         return tuner.get_best_hyperparameters(1)[0]
 
 class PENNModel(BaseModel):
-    def __init__(self, name, model_obj : Visc_PENN_Base, device,n_splits=10, random_state = 0, epochs = 500, apply_gradnorm = False, **kwargs):
+    def __init__(self, name, model_obj : Visc_PENN_Base, device,n_splits=10, random_state = 0, epochs = 500, apply_gradnorm = False, training = True, **kwargs):
         super().__init__(name, model_obj, n_splits, random_state)
         
         self.epochs = epochs
         self.device = device
+        self.training = training
         self.apply_gradnorm = apply_gradnorm
         self.reduce_lr_factor = kwargs.get("reduce_lr_factor", 0.1)
         self.batch_size = kwargs.get("batch_size", 32)
         self.penn_type = 'WLF' if model_obj in [Visc_PENN_WLF, Visc_PENN_PI_WLF, Visc_PENN_WLF_SP] else 'Arr'
         self.lr = kwargs.get("lr", 1e-4)        
     
+    def setup_prediction_data(self):
+        self.prediction_data = {}
+
     def setup_logging(self):
         """
         Sets up logging and initialized wandb run.
@@ -390,11 +391,12 @@ class PENNModel(BaseModel):
         self.log_file = os.path.join(self.model_path, f"{self.name}.log")
         self.logger = make_log(self.log_file)
         
-        self.run = wandb.init(project="Melt_Visc_PENN", name = self.name,
-        config = {
-            "learning_rate": self.lr,
-            "batch_size": self.batch_size
-        })
+        if self.training:
+            self.run = wandb.init(project="Melt_Visc_PENN", name = self.name,
+            config = {
+                "learning_rate": self.lr,
+                "batch_size": self.batch_size
+            })
 
     def train_fold(self, model_fold, fit_X, eval_X, fit_y, eval_y):
         self.logger.info(f"Training {self.name} fold {model_fold}")
@@ -487,14 +489,16 @@ class PENNModel(BaseModel):
     def predict_fold(self, model_fold, X_test):
         return
     
-    def predict_cv(self, X) -> tuple[np.ndarray, np.ndarray]:
+    def predict_cv(self, X, **kwargs) -> tuple[np.ndarray, np.ndarray]:
         """
         Upon prediction, we do, 5 passes for each fold, averaging and taking the std of all 10 folds
         """
         X = [torch.tensor(x).float() for x in X]
         pred = []
+        M = kwargs.get('M', np.array([]))
 
-        for m in self.models:
+        fig = plt.figure()
+        for model_num, m in enumerate(self.models):
             if m:
                 for mod in m.modules():
                     if mod.__class__.__name__.startswith('Dropout'):
@@ -506,7 +510,12 @@ class PENNModel(BaseModel):
                         X = [x_.to(m.device) for x_ in X]
                         y_pred = m(*X).cpu().detach().numpy()
                     pred += [y_pred]
-
+                    if M.shape[0] != 0: 
+                        plt.plot(M.reshape(-1,), y_pred.reshape(-1,))
+        
+        plt.savefig(os.path.join(self.model_path, "cv_pred.png"))
+        plt.close()
+                        
         pred = np.array(pred)
         std = np.std(pred, axis = 0)
         means = np.nanmean(pred, axis = 0)
@@ -514,40 +523,84 @@ class PENNModel(BaseModel):
         return np.array([m[0] for m in means]).reshape(-1,1), np.array([s[0] for s in std]).reshape(-1,1)
 
     def get_constants(self, X):
-        const_list = ['a1', 'a2', 'Mcr', 'kcr', 'c1', 'c2', 'Tr','tau', 'n', 'eta_0']
+        
+        if self.penn_type == 'WLF':
+            const_list = [Visc_Constants.a1.value,
+                    Visc_Constants.a2.value, 
+                    Visc_Constants.Mcr.value, 
+                    Visc_Constants.k1.value, 
+                    Visc_Constants.c1.value, 
+                    Visc_Constants.c2.value, 
+                    Visc_Constants.Tr.value, 
+                    Visc_Constants.Scr.value, 
+                    Visc_Constants.n.value, 
+                    Visc_Constants.beta_M.value,
+                    Visc_Constants.beta_shear.value,]
+        else:
+            const_list = [Visc_Constants.a1.value,
+                    Visc_Constants.a2.value, 
+                    Visc_Constants.Mcr.value, 
+                    Visc_Constants.k1.value, 
+                    Visc_Constants.lnA.value, 
+                    Visc_Constants.EaR.value, 
+                    Visc_Constants.Scr.value, 
+                    Visc_Constants.n.value, 
+                    Visc_Constants.beta_M.value,
+                    Visc_Constants.beta_shear.value,]
+        
         constants = {k:[] for k in const_list}
 
+        X = [torch.tensor(x).float() for x in X]
+
         for m in self.models:
-            _, *const_out = m(*X, get_constants = True)
-            for k,i in zip(constants, range(len(const_out))):
-                constants[k] += [const_out[i].cpu().detach().numpy()]
+            if m:
+                X = [x.to(m.device) for x in X]
+                const_out = m(*X, get_constants = True)
+                for k,i in const_out.items():
+                    constants[k] += [const_out[k].cpu().detach().numpy()]
         
         for k in constants:
             constants[k] = np.array(constants[k])
-            constants[k] = np.nanmean(constants[k], axis = 0)
+            constants[k] = np.nanmean(constants[k], axis = 0).reshape(-1,1)
         
         return constants
+    
+    def predict_constants(self, df : pd.DataFrame, df_fp : pd.DataFrame):
+        fp, M, S, T, P = self.transform_data(df, df_fp, train_data=False)
+        constants = self.get_constants([fp, M, S, T, P])
+        constants = self.transform_constants(constants)
+        return constants
 
+    def transform_constants(self, constants): 
+        """
+        Scale back constants to original scaling.
+        """
+        constants[Visc_Constants.Mcr.value] = self.scalers[FeatureHeaders.mol_weight.value].inverse_transform(constants[Visc_Constants.Mcr.value])
+        constants[Visc_Constants.Scr.value] = self.scalers[FeatureHeaders.shear_rate.value].inverse_transform(constants[Visc_Constants.Scr.value])
+        return constants
+        
     def load_model(self):
         assert self.model_path, "Need to set model_path before loading model."
 
         for fold, model in enumerate(self.models):
-            
-            # Get the fp size from fold path
-            fold_data_path = os.path.join(self.model_path, f"fold_{fold}", "data_split.pkl")
-            with open(fold_data_path, 'rb') as f:
-                loaded_data = pickle.load(f)
-            self.fp_size = loaded_data["fp_size"]
-            
-            config_path = os.path.join(self.model_path, f"fold_{fold}", "best_config.json")
-            ckpt_path = os.path.join(self.model_path, f"fold_{fold}", "checkpoint.pt")
-            
-            with open(config_path, 'r') as f:
-                best_config = json.load(f)
-            
-            model = self.model(self.fp_size, best_config, self.device).to(self.device)
-            model.load_trained_model(ckpt_path)
-            self.models[fold] = model
+            try:
+                # Get the fp size from fold path
+                fold_data_path = os.path.join(self.model_path, f"fold_{fold}", "data_split.pkl")
+                with open(fold_data_path, 'rb') as f:
+                    loaded_data = pickle.load(f)
+                self.fp_size = loaded_data["fp_size"]
+                
+                config_path = os.path.join(self.model_path, f"fold_{fold}", "best_config.json")
+                ckpt_path = os.path.join(self.model_path, f"fold_{fold}", "checkpoint.pt")
+                
+                with open(config_path, 'r') as f:
+                    best_config = json.load(f)
+                
+                model = self.model(self.fp_size, best_config, self.device).to(self.device)
+                model.load_trained_model(ckpt_path)
+                self.models[fold] = model
+            except:
+                print("Couldn't load model ", fold)
 
 class HyperParam_GPR(BaseEstimator, RegressorMixin):
     def __init__(self, alpha=1e-10, length_scale=1.0, constant_value=1.0):

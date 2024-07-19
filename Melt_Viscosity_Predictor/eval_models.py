@@ -25,7 +25,7 @@ class ModelEval:
     var_ranges = {Visc_Constants.a1.value : (0.5, 2.5), 
         Visc_Constants.a2.value : (1, 4),
         Visc_Constants.Mcr.value : (2, 6),
-        Visc_Constants.n.value : (-3, 3),
+        Visc_Constants.n.value : (-1, 1),
         Visc_Constants.Scr.value : (-6, 6),
         Visc_Constants.c1.value : (0, 50),
         Visc_Constants.c2.value : (0, 500)}
@@ -76,6 +76,7 @@ class ModelEval:
         :param extrap_range: The `extrap_range` parameter is a NumPy array that specifies the range of
         values for extrapolation.
         """
+        failed_ann_pred = 0
         extrap_dir = os.path.join(self.sim_dir, "extrap_tests", test_name)
         os.makedirs(extrap_dir, exist_ok= True)
 
@@ -90,51 +91,61 @@ class ModelEval:
                                                         extrap_range=extrap_range)
             if sample_col == FeatureHeaders.mol_weight.value:
                 tests_df[sample_col] = np.log10(tests_df[sample_col])
- 
-            fig = plt.figure()
-            for model_num, model in enumerate(self.models):
-                print(model.name)
-                pred_mean, pred_std = model.inference(tests_df, tests_fp_df)
-                try:
-                    if model.model == Visc_ANN:
-                        if sample_col != FeatureHeaders.temp.value:
-                            constants, _ = self.vars_func_dict[sample_col](np.log10(extrap_range).reshape(-1,), pred_mean.reshape(-1,))
-                        else: 
-                            constants, _ = self.vars_func_dict[sample_col](extrap_range.reshape(-1,), pred_mean.reshape(-1,))
-                    else:
-                        constants = model.predict_constants(tests_df, tests_fp_df)
-                        for k,v in constants.items():
-                            constants[k] = v['mean']
-                    
-                    self.models[model_num].prediction_data["constants"].append(constants)
-                except Exception as e:
-                    print(f"Params not found for {model.name}", samp_id)
-                    print(e)
-                
-                if sample_col != FeatureHeaders.temp.value:
-                    plt.plot(np.log10(extrap_range), pred_mean, '--',label = model.name, color = self.colors[model_num])
-                    plt.fill_between(np.log10(extrap_range), (pred_mean-pred_std).reshape(-1,) , (pred_mean+pred_std).reshape(-1,), alpha = 0.2, color = self.colors[model_num])
-                else:
-                    plt.plot(extrap_range, pred_mean, '--',label = model.name, color = self.colors[model_num])
-                    plt.fill_between(extrap_range, (pred_mean-pred_std).reshape(-1,) , (pred_mean+pred_std).reshape(-1,), alpha = 0.2, color = self.colors[model_num])
-            
-                    # Determine the position for the text annotation (e.g., at the last point of the plot)
-                # x_pos = np.log10(extrap_range)[-1]
-                # y_pos = pred_mean[-1]
-                
-                # Format the constants as a string for annotation
-                #constants_str = '\n'.join([f'{k}: {np.mean(v):.2f}' for k, v in constants.items()])
-                
-                # Annotate the plot with the model name and constants
-                # plt.text(x_pos, y_pos, f'{model.name}\n{constants_str}', fontsize=8, verticalalignment='bottom')
-
 
             # Find training counterparts of the datapoints to plot
             samp_train_idx = (self.train_df_fp.loc[:, self.train_df_fp.columns] == tests_fp_df.iloc[0]).all(axis =1)
             samp_train_df = self.train_df[samp_train_idx]
 
-            #print("train_df",samp_train_df[[sample_col, FeatureHeaders.visc.value]])
+            fig = plt.figure()
+            for model_num, model in enumerate(self.models):
+                print(model.name)
+                pred_mean, pred_std = model.inference(tests_df, tests_fp_df)
+                # try:
+                if model.model == Visc_ANN:
+                    try:
+                        #print(np.log10(extrap_range).reshape(-1,))
+                        if sample_col != FeatureHeaders.temp.value:
+                            constants, _ = self.vars_func_dict[sample_col](np.log10(extrap_range).reshape(-1,), pred_mean.reshape(-1,))
+                        else: 
+                            constants, _ = self.vars_func_dict[sample_col](extrap_range.reshape(-1,), pred_mean.reshape(-1,))
 
+                        if Visc_Constants.Scr.value in constants.keys():
+                            constants[Visc_Constants.Scr.value] = np.log10(constants[Visc_Constants.Scr.value])
+                        
+                        print("pred", pred_mean.reshape(-1,))
+                        print("const", constants)
+
+                        self.models[model_num].prediction_data["constants"].append(constants)
+
+                    except RuntimeError as e:
+                        print("Unable to fit ANN predictions.")
+                        failed_ann_pred += 1
+                else:
+                    constants = model.predict_constants(tests_df, tests_fp_df)
+                    for k,v in constants.items():
+                        constants[k] = v
+                
+                    self.models[model_num].prediction_data["constants"].append(constants)
+
+                if sample_col != FeatureHeaders.temp.value:
+                    print("plotting", model.name)
+                    plt.plot(np.log10(extrap_range), pred_mean, '--',label = model.name, color = self.colors[model_num])
+                    plt.fill_between(np.log10(extrap_range), (pred_mean-pred_std).reshape(-1,) , (pred_mean+pred_std).reshape(-1,), alpha = 0.2, color = self.colors[model_num])
+                else:
+                    plt.plot(extrap_range, pred_mean, '--',label = model.name, color = self.colors[model_num])
+                    plt.fill_between(extrap_range, (pred_mean-pred_std).reshape(-1,) , (pred_mean+pred_std).reshape(-1,), alpha = 0.2, color = self.colors[model_num])
+                
+                    # Determine the position for the text annotation (e.g., at the last point of the plot)
+                    # x_pos = np.log10(extrap_range)[-1]
+                    # y_pos = pred_mean[-1]
+                    
+                    # Format the constants as a string for annotation
+                    #constants_str = '\n'.join([f'{k}: {np.mean(v):.2f}' for k, v in constants.items()])
+                    
+                    # Annotate the plot with the model name and constants
+                    # plt.text(x_pos, y_pos, f'{model.name}\n{constants_str}', fontsize=8, verticalalignment='bottom')
+
+                #print("train_df",samp_train_df[[sample_col, FeatureHeaders.visc.value]])
             if sample_col == FeatureHeaders.shear_rate.value:
                 samp_train_df.loc[:, sample_col] = np.log10(samp_train_df[sample_col])
                 trial_df.loc[:, sample_col] = np.log10(trial_df[sample_col])
@@ -145,9 +156,13 @@ class ModelEval:
             plt.savefig(os.path.join(extrap_dir, f"extrap_id{samp_id}.png"))
             plt.close()
 
+            print("FAILED ANN PRED = ", failed_ann_pred)
+
         # Compile the constant predictions in a list of dicts
         for model_num, model in enumerate(self.models):
             self.models[model_num].prediction_data["constants"] = merge_dict_list(self.models[model_num].prediction_data["constants"])
+            print(model_num)
+            print(self.models[model_num].prediction_data["constants"])
     
     @staticmethod
     def get_sample_ids(data: pd.DataFrame, fp_data : pd.DataFrame, sort_columns: list,
@@ -226,7 +241,7 @@ class ModelEval:
 
         return ground_truth_const
 
-    def plot_constant_histograms(self, constant_names, output_file, bins=20):
+    def plot_constant_histograms(self, constant_names, output_file, bins=20, **kwargs):
         """
         Plot histograms of predicted constants for multiple models.
         
@@ -236,6 +251,7 @@ class ModelEval:
         :param output_file: File path to save the output figure
         :param bins: Number of bins for histograms (default 20)
         """
+        model_names_dict = kwargs.get("model_names_dict", {})
 
         true_data = self.get_ground_truth_constants()
         
@@ -270,6 +286,9 @@ class ModelEval:
                 predicted_values = model.prediction_data['constants'].get(constant, [])
                 print(model.name, constant)
                 print("pred values",predicted_values)
+                if isinstance(predicted_values, np.ndarray):
+                    predicted_values = predicted_values.tolist()
+
                 y, _, patches = ax.hist(predicted_values, bins=bin_edges, alpha=0.5, color=colors[i], density=True)
                 for patch in patches:
                     patch.set_height(patch.get_height() / sum(y))
@@ -284,7 +303,12 @@ class ModelEval:
                             ha='left', va='top', fontsize=8)
                 
                 if j == 0:
+                    # Name the columns according to the provided names, otherwise name them from the model name
                     ax.set_ylabel(model.name, fontsize=10)
+                    for k,v in model_names_dict.items():
+                        if k in model.name:
+                            ax.set_ylabel(v, fontsize=10)
+                    
                 ax.set_ylim(0, 1)
             
             # Set x-label only for bottom row
@@ -311,15 +335,15 @@ class ModelEval:
 
 def merge_dict_list(dict_list):
     
-    def merge_lists(input_list):
-        # Check if the input is a list of lists
-        if isinstance(input_list, list) and all(isinstance(i, list) for i in input_list):
-            # Merge the list of lists into a single list
-            merged_list = [item for sublist in input_list for item in sublist]
-            return merged_list
-        else:
-            # Return the input as is if it's not a list of lists
-            return input_list
+    def flatten_list(nested_list):
+        flattened = []
+        for item in nested_list:
+            if isinstance(item, list):
+                flattened.extend(flatten_list(item))
+            else:
+                flattened.append(item)
+        return flattened
+
     
     result = {}
     
@@ -331,7 +355,7 @@ def merge_dict_list(dict_list):
             
 
     for key, value in result.items():
-        result[key] = merge_lists(value)
+        result[key] = flatten_list(value)
 
     return result
 
@@ -339,7 +363,6 @@ def merge_dict_list(dict_list):
 if __name__ == '__main__':
     
     ModelEval.get_ground_truth_constants()
-
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
@@ -352,22 +375,23 @@ if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-    split_name = "training_shear_split_1"
+    split_name = "training_mw_split_3"
     models = [#GPRModel(name = 'GPR', model_obj= HyperParam_GPR()),
-    #PENNModel(name= split_name + '_ANN', model_obj=Visc_ANN, device = device, training = False),
+    PENNModel(name= split_name + '_ANN', model_obj=Visc_ANN, device = device, training = False),
     # PENNModel(name = split_name + '_PENN_WLF_Hybrid', model_obj=Visc_PENN_WLF_Hybrid, device = device, training = False),
-    PENNModel(name = split_name + '_PENN_WLF', model_obj=Visc_PENN_WLF, device = device, training = False),
+    PENNModel(name = split_name + '_PENN_WLF_critadj', model_obj=Visc_PENN_WLF, device = device, training = False),]
     # PENNModel(name = split_name + '_PENN_WLF_SP', model_obj=Visc_PENN_WLF_SP, device = device, training = False),
-    PENNModel(name = split_name + '_PENN_Arrhenius', model_obj=Visc_PENN_Arrhenius, device = device, training = False),]
+    # PENNModel(name = split_name + '_PENN_Arrhenius_critadj', model_obj=Visc_PENN_Arrhenius, device = device, training = False),]
     # PENNModel(name = split_name + '_PENN_Arrhenius_SP', model_obj=Visc_PENN_Arrhenius_SP, device = device, training = False)]
     model_eval = ModelEval(split_name, models)
 
     # model_eval.evaluate_models()
 
-    model_eval.extrapolation_test("Mw_extrap",sample_col = FeatureHeaders.shear_rate.value,
-                                    const_col = [FeatureHeaders.mol_weight.value, FeatureHeaders.temp.value],
-                                    extrap_range= np.power(10, np.linspace(-3, 20))) #np.linspace(300, 600)) #
+    model_eval.extrapolation_test("Mw_extrap",sample_col = FeatureHeaders.mol_weight.value,
+                                    const_col = [FeatureHeaders.shear_rate.value, FeatureHeaders.temp.value],
+                                    extrap_range= np.power(10, np.linspace(2, 8))) #np.linspace(300, 600)) #
 
-    model_eval.plot_constant_histograms(constant_names=[Visc_Constants.c1.value, Visc_Constants.c2.value, Visc_Constants.Tr.value], 
-                                                output_file=os.path.join(model_eval.sim_dir, "constants.png"))
+    model_eval.plot_constant_histograms(constant_names=[Visc_Constants.a1.value, Visc_Constants.a2.value, Visc_Constants.Mcr.value], 
+                                                output_file=os.path.join(model_eval.sim_dir, "constants_mw.png"),
+                                                model_names_dict = {"ANN": "ANN", "PENN_WLF": "PENN"})
     
