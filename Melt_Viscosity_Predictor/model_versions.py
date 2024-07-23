@@ -14,6 +14,7 @@ from keras.callbacks import EarlyStopping as EarlyStoppingKeras
 from utils.train_utils import FeatureHeaders, hyperparam_opt_ray
 from utils.metrics import OME
 from utils.model_utils import batch_predict
+from data_tools.curve_fitting import fit_WLF, WLF_obj
 from torch.utils.data.dataloader import DataLoader
 from utils.train_torch import MVDataset, run_training
 from sklearn.preprocessing import MinMaxScaler
@@ -577,6 +578,20 @@ class PENNModel(BaseModel):
         """
         constants[Visc_Constants.Mcr.value] = self.scalers[FeatureHeaders.mol_weight.value].inverse_transform(constants[Visc_Constants.Mcr.value])
         constants[Visc_Constants.Scr.value] = self.scalers[FeatureHeaders.shear_rate.value].inverse_transform(constants[Visc_Constants.Scr.value])
+        
+        # Transform WLF constants
+        if Visc_Constants.c1.value in constants.keys():
+            t_sc_range = np.linspace(-1, 1)
+            
+            for i, (c1, c2, tr) in enumerate(zip(constants[Visc_Constants.c1.value], constants[Visc_Constants.c2.value], constants[Visc_Constants.Tr.value])):
+                scaled_wlf = WLF_obj(t_sc_range, tr, c1, c2, 0)
+                unsc_wlf = self.scalers[FeatureHeaders.visc.value].inverse_transform(scaled_wlf.reshape(-1,1))
+                unsc_temp = self.scalers[FeatureHeaders.temp.value].inverse_transform(t_sc_range.reshape(-1,1))
+                unsc_const, _ = fit_WLF(unsc_temp.reshape(-1,), unsc_wlf.reshape(-1,))
+                constants[Visc_Constants.c1.value][i] = unsc_const[Visc_Constants.c1.value]
+                constants[Visc_Constants.c2.value][i] = unsc_const[Visc_Constants.c2.value]
+                constants[Visc_Constants.Tr.value][i] = unsc_const[Visc_Constants.Tr.value]
+
         return constants
         
     def load_model(self):

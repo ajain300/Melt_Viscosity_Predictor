@@ -17,6 +17,7 @@ import torch
 from torch.utils.data.dataloader import DataLoader
 from utils.model_utils import predict_all_cv, load_models
 from utils.train_utils import *
+from utils.Gpuwait import GpuWait
 from model_versions import *
 from Visc_PENN import *
 import keras_tuner as kt
@@ -140,7 +141,7 @@ class ModelTrainer:
         os.makedirs(os.path.join(TRAINING_DIR, self.name, DATASET_DIR), exist_ok=True)
         if split_type == 'polyphysics':
             train_df, test_df, tested_samples_unselected_df,split_conditions, group_median = poly_physics_train_test_split_unique_median(df, "SMILES", 
-            [FeatureHeaders.mol_weight.value])
+            [FeatureHeaders.shear_rate.value])
             group_median.to_csv(os.path.join(self.sim_dir, "group_medians.csv"))
         elif split_type == 'poly_N_exp':
             train_df, test_df = poly_physics_train_test_split_N_train(df, "SMILES", 5)
@@ -384,6 +385,12 @@ class ModelTrainer:
 
         #Shear
 
+        train_df = self.train_df.copy()
+        train_df['Dataset'] = 'Train'
+        test_df = self.test_df.copy()
+        test_df['Dataset'] = 'Test'
+        combined_df = pd.concat([train_df, test_df]).reset_index(drop=True)
+
         shear_df = combined_df[combined_df[FeatureHeaders.shear_rate.value] > 0]
         shear_df[FeatureHeaders.shear_rate.value] = np.log10(shear_df[FeatureHeaders.shear_rate.value])
         # for i in shear_df.index:
@@ -400,6 +407,22 @@ class ModelTrainer:
         shear_plot.ax_joint.set(yticklabels=[], ylabel = None, ylim = y_lim)
 
         plt.savefig(os.path.join(plotting_dir, "shear_plot.png"))
+
+        for test_id in test_df['test_id'].unique():
+            print("shear test plotting", test_id)
+            test_sample_unselected_df = self.test_samples_unselect.copy()[self.test_samples_unselect['test_id'] == test_id]
+            test_sample_unselected_df['Dataset'] = 'Train_Samples'
+            test_df = self.test_df.copy()[self.test_df['test_id'] == test_id]
+            test_df['Dataset'] = 'Test'
+            combined_df = pd.concat([test_sample_unselected_df, test_df]).reset_index(drop=True)
+            shear_sample_plot = sns.jointplot(data=combined_df, x=FeatureHeaders.shear_rate.value, y=FeatureHeaders.visc.value, hue='Dataset', kind='scatter', height=5)
+            shear_sample_plot.ax_marg_y.remove()
+            shear_sample_plot.ax_joint.set_xticks(list(np.arange(-4,7,4)),  [r'$10^{-4}$'] + [rf'$10^{i}$' for i in list(np.arange(0,7,4))], fontsize = 15)
+            shear_sample_plot.ax_joint.set_yticks(list(np.arange(0,13,4)), [rf'$10^{i}$' for i in list(np.arange(0,9,4))] + [r'$10^{12}$'], fontsize = 15)
+            shear_sample_plot.set_axis_labels(r'$\dot{\gamma}$ (1/s)', r'$\eta$ (Poise)')
+            shear_sample_plot.ax_joint.set(ylim = y_lim)
+            
+            plt.savefig(os.path.join(plotting_dir, f"shear_plot_unselected_{test_id}.png"))
 
         #Temperature
 
@@ -432,7 +455,7 @@ class ModelTrainer:
             temp_plot.set_axis_labels(r'$M_w$ (g/mol)', r'$\eta$ (Poise)')
             temp_plot.ax_joint.set(ylim = y_lim)
             
-            plt.savefig(os.path.join(plotting_dir, f"Mw_plot_unselected_{test_id}.png"))
+            plt.savefig(os.path.join(plotting_dir, f"temp_plot_unselected_{test_id}.png"))
 
         #PDI
 
@@ -476,6 +499,9 @@ if __name__ == '__main__':
     # Set multiprocessing to spawn
     multiprocessing.set_start_method('spawn', force=True)
     
+    with GpuWait(10, 3600*10, 0.9) as wait:
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
@@ -507,19 +533,19 @@ if __name__ == '__main__':
     # gpr = GPflowRegressor(kernel=kernel)
     
 
-    training_name = "training_mw_split_3"
+    training_name = "training_shear_split_2"
     models = [#GPRModel(name = 'GPR', model_obj= HyperParam_GPR()),
-    # PENNModel(name = training_name + '_ANN', model_obj=Visc_ANN,
-    #                                         device = device, lr = 1e-3, epochs = 1000, batch_size = 8, 
-    #                                         reduce_lr_factor = 0.5),
+    PENNModel(name = training_name + '_ANN', model_obj=Visc_ANN,
+                                            device = device, lr = 1e-3, epochs = 1000, batch_size = 8, 
+                                            reduce_lr_factor = 0.5),
     # PENNModel(name = training_name + '_PENN_WLF_Hybrid', model_obj=Visc_PENN_WLF_Hybrid, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
                                                                             # reduce_lr_factor = 0.5, apply_gradnorm = False),
     PENNModel(name = training_name + '_PENN_WLF_critadj', model_obj=Visc_PENN_WLF, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
-                                                                            reduce_lr_factor = 0.5, apply_gradnorm = False),
+                                                                            reduce_lr_factor = 0.5, apply_gradnorm = False),]
     # PENNModel(name = training_name +'_PENN_WLF_SP', model_obj=Visc_PENN_WLF_SP, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
     #                                                                         reduce_lr_factor = 0.5, apply_gradnorm = False),
-    PENNModel(name = training_name +'_PENN_Arrhenius_critadj', model_obj=Visc_PENN_Arrhenius, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
-                                                                            reduce_lr_factor = 0.5, apply_gradnorm = False),]
+    # PENNModel(name = training_name +'_PENN_Arrhenius_critadj', model_obj=Visc_PENN_Arrhenius, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
+                                                                            #reduce_lr_factor = 0.5, apply_gradnorm = False),]
     # PENNModel(name = training_name +'_PENN_Arrhenius_SP', model_obj=Visc_PENN_Arrhenius_SP, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 
     #                                                                         reduce_lr_factor = 0.5, apply_gradnorm = False),]
     #   PENNModel(name = training_name +'_PENN_PI_WLF_gradnorm', model_obj=Visc_PENN_PI_WLF, device = device, lr = 1e-4, epochs = 1000, batch_size = 8, 

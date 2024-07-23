@@ -23,7 +23,7 @@ class ModelEval:
     colors = [plt.get_cmap('Accent')(0.3),plt.get_cmap('Accent')(0.2), plt.get_cmap('Accent')(0.1), plt.get_cmap('Accent')(0.5), plt.get_cmap('Accent')(0.4)]
     
     var_ranges = {Visc_Constants.a1.value : (0.5, 2.5), 
-        Visc_Constants.a2.value : (1, 4),
+        Visc_Constants.a2.value : (0.5, 4),
         Visc_Constants.Mcr.value : (2, 6),
         Visc_Constants.n.value : (-1, 1),
         Visc_Constants.Scr.value : (-6, 6),
@@ -63,7 +63,7 @@ class ModelEval:
             # Load the dictionary from the file using pickle
             self.scalers = pickle.load(file)
     
-    def extrapolation_test(self, test_name, sample_col, const_col, extrap_range : np.ndarray):
+    def extrapolation_test(self, test_name, sample_col, const_col, extrap_range_dict : Dict[str, np.ndarray]):
         """
         This function performs extrapolation tests using sample data and saves the results as plots in a
         specified directory.
@@ -78,6 +78,7 @@ class ModelEval:
         """
         failed_ann_pred = 0
         extrap_dir = os.path.join(self.sim_dir, "extrap_tests", test_name)
+        extrap_range = extrap_range_dict[sample_col]
         os.makedirs(extrap_dir, exist_ok= True)
 
         sample_data, sample_data_fp, sample_ids = self.get_sample_ids(self.test_df, self.test_df_fp, 
@@ -375,23 +376,25 @@ if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-    split_name = "training_mw_split_3"
+    split_name = "training_temp_split_0"
     models = [#GPRModel(name = 'GPR', model_obj= HyperParam_GPR()),
     PENNModel(name= split_name + '_ANN', model_obj=Visc_ANN, device = device, training = False),
     # PENNModel(name = split_name + '_PENN_WLF_Hybrid', model_obj=Visc_PENN_WLF_Hybrid, device = device, training = False),
-    PENNModel(name = split_name + '_PENN_WLF_critadj', model_obj=Visc_PENN_WLF, device = device, training = False),]
+    PENNModel(name = split_name + '_PENN_WLF', model_obj=Visc_PENN_WLF, device = device, training = False),
     # PENNModel(name = split_name + '_PENN_WLF_SP', model_obj=Visc_PENN_WLF_SP, device = device, training = False),
-    # PENNModel(name = split_name + '_PENN_Arrhenius_critadj', model_obj=Visc_PENN_Arrhenius, device = device, training = False),]
+    PENNModel(name = split_name + '_PENN_Arrhenius', model_obj=Visc_PENN_Arrhenius, device = device, training = False),]
     # PENNModel(name = split_name + '_PENN_Arrhenius_SP', model_obj=Visc_PENN_Arrhenius_SP, device = device, training = False)]
     model_eval = ModelEval(split_name, models)
 
     # model_eval.evaluate_models()
 
-    model_eval.extrapolation_test("Mw_extrap",sample_col = FeatureHeaders.mol_weight.value,
-                                    const_col = [FeatureHeaders.shear_rate.value, FeatureHeaders.temp.value],
-                                    extrap_range= np.power(10, np.linspace(2, 8))) #np.linspace(300, 600)) #
+    model_eval.extrapolation_test("Mw_extrap",sample_col = FeatureHeaders.temp.value,
+                                    const_col = [FeatureHeaders.mol_weight.value, FeatureHeaders.shear_rate.value],
+                                    extrap_range_dict= {FeatureHeaders.mol_weight.value : np.power(10, np.linspace(2, 8)),
+                                                    FeatureHeaders.shear_rate.value : np.power(10, np.linspace(-5, 5)),
+                                                    FeatureHeaders.temp.value : np.linspace(300, 600)})
 
-    model_eval.plot_constant_histograms(constant_names=[Visc_Constants.a1.value, Visc_Constants.a2.value, Visc_Constants.Mcr.value], 
+    model_eval.plot_constant_histograms(constant_names=[Visc_Constants.c1.value, Visc_Constants.c2.value, Visc_Constants.Tr.value], 
                                                 output_file=os.path.join(model_eval.sim_dir, "constants_mw.png"),
                                                 model_names_dict = {"ANN": "ANN", "PENN_WLF": "PENN"})
     

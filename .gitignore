@@ -3,6 +3,11 @@
 /.ipynb_checkpoints/
 /Paper_Fig/
 /wandb/
+/MODELS/
+/LGN/
 *.log
+/__pycache__/
+*pycache*
 *__pycache__*
 Melt_Viscosity_Predictor/MODELS/
+/wandb/

@@ -10,10 +10,31 @@ from sklearn.model_selection import train_test_split
 import sys
 sys.path.append('../')
 from utils.metrics import OME
+from sklearn.base import BaseEstimator, RegressorMixin
+
+class GPflowRegressor(BaseEstimator, RegressorMixin):
+    def __init__(self, kernel, likelihood_variance=1.0):
+        self.kernel = kernel
+        self.likelihood_variance = likelihood_variance
+        self.model = None
+
+    def fit(self, X, y):
+        self.model = gpflow.models.GPR(data=(X, y), kernel=self.kernel, mean_function=None)
+        self.model.likelihood.variance.assign(self.likelihood_variance)
+        opt = gpflow.optimizers.Scipy()
+        opt.minimize(self.model.training_loss, self.model.trainable_variables, options=dict(maxiter=100))
+        return self
+
+    def predict(self, X, return_std=False):
+        mean, var = self.model.predict_f(X)
+        if return_std:
+            return mean.numpy().flatten(), var.numpy().flatten()**0.5
+        else:
+            return mean.numpy().flatten()
 
 def create_GPR(X, Y):
-    #k = gpflow.kernels.SquaredExponential( variance = 3.0, lengthscales=20.0) * gpflow.kernels.White(variance = 0.000001)
-    k = Tanimoto() * gpflow.kernels.SquaredExponential(variance = 1.0, lengthscales=30.0)
+    k = gpflow.kernels.SquaredExponential(variance = 3.0, lengthscales=20.0) * gpflow.kernels.White(variance = 0.000001)
+    #k = Tanimoto() * gpflow.kernels.SquaredExponential(variance = 1.0, lengthscales=30.0)
     m = gpflow.models.GPR(data=(X, Y), kernel=k, mean_function=None, noise_variance=7)
     opt = gpflow.optimizers.Scipy()
     opt_logs = opt.minimize(m.training_loss, m.trainable_variables, options=dict(maxiter=100))

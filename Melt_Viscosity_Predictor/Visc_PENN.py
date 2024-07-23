@@ -279,8 +279,8 @@ class Visc_PENN_WLF(Visc_PENN_Base):
         self.alpha_1 = self.sig(params[:,0])*torch.tensor(3).to(self.device)
         self.alpha_2 = self.sig(params[:,1])*torch.tensor(6).to(self.device)
         self.k_1 = torch.tensor(2).to(self.device) * self.tanh(params[:,2]) - torch.tensor(1.0).to(self.device)
-        self.beta_M = torch.tensor(20).to(self.device) + self.sig(params[:,3])*torch.tensor(40).to(self.device)
-        self.M_cr = self.tanh(params[:,4])*torch.tensor(0.5).to(self.device)
+        self.beta_M = torch.tensor(30).to(self.device) + self.sig(params[:,3])*torch.tensor(30).to(self.device)
+        self.M_cr = self.sig(params[:,4])*torch.tensor(0.5).to(self.device) - torch.tensor(0.5).to(self.device)
         self.C_1 = self.sig(params[:,5])*torch.tensor(2).to(self.device)
         self.C_2 = self.sig(params[:,6])*torch.tensor(2).to(self.device)
         self.T_r = self.tanh(params[:,7]) - 1.0

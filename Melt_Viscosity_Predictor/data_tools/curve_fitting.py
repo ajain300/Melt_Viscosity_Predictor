@@ -98,13 +98,13 @@ def fit_softplus_3(M, Y):
     return vars
 
 def shear_func_obj(S, Z_S, n, S_cr):
-    V = np.log10(Z_S) - (1-n)*np.log10(1+(S/S_cr))
+    V = np.log10(Z_S) - (n)*np.log10(1+(S/S_cr))
     return V
 
 def fit_shear(S, Y):
     
     S = np.power(10, S)
-    vars_s, _ = curve_fit(shear_func_obj, S, Y, p0 = [1E4, 0.7, 1E1])
+    vars_s, _ = curve_fit(shear_func_obj, S, Y, p0 = [1E4, 0.7, 1E1], maxfev = 5000)
     r2 = r2_score(Y, shear_func_obj(S, *vars_s))
 
     return {"S" : vars_s[0], "n" : vars_s[1], "S_cr" : vars_s[2]}, r2
