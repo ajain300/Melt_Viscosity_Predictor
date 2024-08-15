@@ -54,7 +54,17 @@ DATASET_DIR = "data_splits"
 
 class ModelTrainer:
     fp_memo = {}
-    def __init__(self, name : str, config_args : dict, models : list[BaseModel], data_split_type = 'polyphysics'):
+    valid_kwargs = ['polyphysics_split_var']
+    def __init__(self, name : str, 
+                 config_args : dict, 
+                 models : list[BaseModel], 
+                 data_split_type = 'polyphysics',
+                 **kwargs):
+        # Check kwargs
+        for key in kwargs:
+            if key not in self.valid_kwargs:
+                raise TypeError(f"Unexpected keyword argument '{key}'")
+        
         # Set training directory
         self.name = name
         os.makedirs(os.path.join(TRAINING_DIR, name), exist_ok=True)
@@ -74,7 +84,7 @@ class ModelTrainer:
 
             # Get test train split
             self.full_data = data
-            self.train_df, self.test_df, self.test_samples_unselect = self.split_data(data, data_split_type)
+            self.train_df, self.test_df, self.test_samples_unselect = self.split_data(data, data_split_type, **kwargs)
             self.train_df_fp, self.test_df_fp = self.full_data_fp.loc[self.train_df.index], self.full_data_fp.loc[self.test_df.index]
             
             # Plot the data split
@@ -137,11 +147,12 @@ class ModelTrainer:
 
         return data
 
-    def split_data(self, df : pd.DataFrame, split_type : str):
+    def split_data(self, df : pd.DataFrame, split_type : str, **kwargs):
         os.makedirs(os.path.join(TRAINING_DIR, self.name, DATASET_DIR), exist_ok=True)
         if split_type == 'polyphysics':
+            print("Physical parameter split on", kwargs.get('polyphysics_split_var', FeatureHeaders.mol_weight.value))
             train_df, test_df, tested_samples_unselected_df,split_conditions, group_median = poly_physics_train_test_split_unique_median(df, "SMILES", 
-            [FeatureHeaders.shear_rate.value])
+            [kwargs.get('polyphysics_split_var', FeatureHeaders.mol_weight.value)])
             group_median.to_csv(os.path.join(self.sim_dir, "group_medians.csv"))
         elif split_type == 'poly_N_exp':
             train_df, test_df = poly_physics_train_test_split_N_train(df, "SMILES", 5)
@@ -499,8 +510,8 @@ if __name__ == '__main__':
     # Set multiprocessing to spawn
     multiprocessing.set_start_method('spawn', force=True)
     
-    with GpuWait(10, 3600*10, 0.9) as wait:
-        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    # with GpuWait(10, 3600*10, 0.2) as wait:
+    #     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
@@ -533,7 +544,7 @@ if __name__ == '__main__':
     # gpr = GPflowRegressor(kernel=kernel)
     
 
-    training_name = "training_shear_split_2"
+    training_name = "training_temp_split_1"
     models = [#GPRModel(name = 'GPR', model_obj= HyperParam_GPR()),
     PENNModel(name = training_name + '_ANN', model_obj=Visc_ANN,
                                             device = device, lr = 1e-3, epochs = 1000, batch_size = 8, 
@@ -553,6 +564,7 @@ if __name__ == '__main__':
     #PENNModel(name = 'PENN_PI_Arrhenius_lr1e-5_b8', model_obj=Visc_PENN_PI_Arrhenius, device = device, lr = 1e-5, epochs = 200, batch_size = 8),
     #PENNModel(name = 'PENN_WLF_SP_lr1e-5_b8', model_obj=Visc_PENN_WLF_SP, device = device, lr = 1e-5, epochs = 200, batch_size = 8),]
 
-    trainer = ModelTrainer(training_name,args, models, data_split_type='polyphysics')
+    trainer = ModelTrainer(training_name,args, models, data_split_type='polyphysics',
+                            polyphysics_split_var = FeatureHeaders.temp.value)
 
     trainer.train_models()

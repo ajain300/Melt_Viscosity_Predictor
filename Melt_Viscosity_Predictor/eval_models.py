@@ -10,6 +10,8 @@ from utils.eval_utils import extrap_test
 from data_tools.curve_fitting import fit_Mw, fit_shear, fit_WLF
 from scipy.stats import entropy
 from typing import List
+from sklearn.decomposition import PCA
+import numpy as np
 
 TRAINING_DIR = "/data/ayush/Melt_Viscosity_Predictor/Melt_Viscosity_Predictor/MODELS/"
 DATASET_DIR = "data_splits"
@@ -17,9 +19,12 @@ CONSTANT_DIR = "/data/ayush/Melt_Viscosity_Predictor/Data"
 class ModelEval:
     vars_func_dict = {FeatureHeaders.mol_weight.value : fit_Mw, 
         FeatureHeaders.shear_rate.value : fit_shear,
-        FeatureHeaders.temp.value : fit_WLF,
-        FeatureHeaders.PDI.value : 4}
+        FeatureHeaders.temp.value : fit_WLF}
     
+    vars_label_dict = {FeatureHeaders.mol_weight.value : r'$M_w$ (g/mol)', 
+        FeatureHeaders.shear_rate.value : r'$\dot{\gamma}$ (1/s)',
+        FeatureHeaders.temp.value : r'$T$ (K)'}
+
     colors = [plt.get_cmap('Accent')(0.3),plt.get_cmap('Accent')(0.2), plt.get_cmap('Accent')(0.1), plt.get_cmap('Accent')(0.5), plt.get_cmap('Accent')(0.4)]
     
     var_ranges = {Visc_Constants.a1.value : (0.5, 2.5), 
@@ -28,7 +33,9 @@ class ModelEval:
         Visc_Constants.n.value : (-1, 1),
         Visc_Constants.Scr.value : (-6, 6),
         Visc_Constants.c1.value : (0, 50),
-        Visc_Constants.c2.value : (0, 500)}
+        Visc_Constants.c2.value : (0, 500),
+        Visc_Constants.Tr.value : (100, 400),
+        }
 
     def __init__(self, name : str, models : list[BaseModel]):
         
@@ -94,10 +101,14 @@ class ModelEval:
                 tests_df[sample_col] = np.log10(tests_df[sample_col])
 
             # Find training counterparts of the datapoints to plot
-            samp_train_idx = (self.train_df_fp.loc[:, self.train_df_fp.columns] == tests_fp_df.iloc[0]).all(axis =1)
+            const_train_idx = (np.isclose(self.train_df.loc[:, const_col], tests_df.iloc[0][const_col], rtol=1e-2)).all(axis=1)
+            # if sample_col == FeatureHeaders.temp.value:
+            #     samp_train_idx = (self.train_df_fp.loc[:, self.train_df_fp.columns] == tests_fp_df.iloc[0]).all(axis=1)
+            # else:
+            samp_train_idx = const_train_idx & (self.train_df_fp.loc[:, self.train_df_fp.columns] == tests_fp_df.iloc[0]).all(axis=1)
             samp_train_df = self.train_df[samp_train_idx]
 
-            fig = plt.figure()
+            fig = plt.figure(figsize=(5, 5))
             for model_num, model in enumerate(self.models):
                 print(model.name)
                 pred_mean, pred_std = model.inference(tests_df, tests_fp_df)
@@ -112,9 +123,6 @@ class ModelEval:
 
                         if Visc_Constants.Scr.value in constants.keys():
                             constants[Visc_Constants.Scr.value] = np.log10(constants[Visc_Constants.Scr.value])
-                        
-                        print("pred", pred_mean.reshape(-1,))
-                        print("const", constants)
 
                         self.models[model_num].prediction_data["constants"].append(constants)
 
@@ -153,12 +161,35 @@ class ModelEval:
 
             plt.scatter(samp_train_df[sample_col], samp_train_df[FeatureHeaders.visc.value], label = "Train points")
             plt.scatter(trial_df[sample_col], trial_df[FeatureHeaders.visc.value], label = "Test points")
+            if sample_col == FeatureHeaders.mol_weight.value:
+                plt.xticks(list(np.arange(2,9,2)),[rf'$10^{i}$' for i in list(np.arange(2,9,2))], fontsize = 14)
+                plt.title(trial_df[FeatureHeaders.smiles.value][0] + '\n' + r'$\dot{\gamma}$ ' + rf'= {trial_df[FeatureHeaders.shear_rate.value][0]} 1/s' + '\n' + f'Temp =  {trial_df[FeatureHeaders.temp.value][0]} K', 
+                          pad=20)
+                plt.yticks(list(np.arange(-2,15,4)), [rf'$10^{{{i}}}$' for i in list(np.arange(-2,15,4))], fontsize = 14)
+            elif sample_col == FeatureHeaders.shear_rate.value:
+                plt.xticks(list(np.arange(-5,6,3)), [rf'$10^{{{i}}}$' for i in list(np.arange(-5,6,3))], fontsize = 14)
+                plt.title(trial_df[FeatureHeaders.smiles.value][0] + '\n' + rf'$M_w$ = {np.power(10, trial_df[FeatureHeaders.mol_weight.value][0])} g/mol' + '\n' + f'Temp = {trial_df[FeatureHeaders.temp.value][0]} K', 
+                          pad=10)
+                plt.yticks(list(np.arange(-2,9,2)), [rf'$10^{{{i}}}$' for i in list(np.arange(-2,9,2))], fontsize = 14)
+            elif sample_col == FeatureHeaders.temp.value:
+                plt.title(trial_df[FeatureHeaders.smiles.value][0] + '\n' + rf'$M_w$ = {np.power(10, trial_df[FeatureHeaders.mol_weight.value][0])} g/mol' + '\n' + r'$\dot{\gamma}$ ' + rf'= {trial_df[FeatureHeaders.shear_rate.value][0]} 1/s', 
+                          pad=10)
+                plt.xticks(fontsize=14)
+                # plt.yticks(fontsize=14)
+                y_ticks = plt.gca().get_yticks()
+                y_ticks = [int(tick) for tick in y_ticks if tick.is_integer()]
+                plt.yticks(y_ticks, [rf'$10^{{{i}}}$' for i in y_ticks], fontsize = 14)
+
+            
+            plt.ylabel(r'$\eta$ (Poise)', fontsize = 12)
+            plt.xlabel(self.vars_label_dict[sample_col], fontsize = 12)
             plt.legend()
+            plt.tight_layout(pad=2)
             plt.savefig(os.path.join(extrap_dir, f"extrap_id{samp_id}.png"))
+            plt.savefig(os.path.join(extrap_dir, f"extrap_id{samp_id}.svg"), dpi = 300)
             plt.close()
 
             print("FAILED ANN PRED = ", failed_ann_pred)
-
         # Compile the constant predictions in a list of dicts
         for model_num, model in enumerate(self.models):
             self.models[model_num].prediction_data["constants"] = merge_dict_list(self.models[model_num].prediction_data["constants"])
@@ -218,7 +249,7 @@ class ModelEval:
     def evaluate_models(self):
         for model in self.models:
             print(f"Evaluating {model.name}")
-            model.evaluate(self.test_df, self.test_df_fp, eval_type = "eval_models_test")
+            model.evaluate(self.test_df, self.test_df_fp, eval_type = "eval_models_test_losssurf")
 
             # Get relavant constants for the test_df
     
@@ -234,11 +265,14 @@ class ModelEval:
         shear_data[Visc_Constants.Scr.value] = shear_data.pop('tau')
 
         temp_data = pd.read_pickle('../Data/temp_const_data2.pickle').to_dict()
+        temp_data[Visc_Constants.Tr.value] = temp_data.pop('Tr')
 
         ground_truth_const = {**Mw_data, **shear_data, **temp_data}
 
         for k,d in ground_truth_const.items():
             ground_truth_const[k] = [v for i,v in d.items() if np.isfinite(v)]
+
+        ground_truth_const[Visc_Constants.Scr.value] = np.log10(np.array(ground_truth_const[Visc_Constants.Scr.value]) / np.array(ground_truth_const['z_shear']))
 
         return ground_truth_const
 
@@ -332,7 +366,131 @@ class ModelEval:
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
 
+    def loss_surface_comparison(self):
+        # Extract all parameters from both networks
+
+        ann = self.models[0].models[0] #ANN split 1
+        penn = self.models[1].models[1] #PENN split 1
+        
+        ann_params = [param.cpu().detach().numpy() for param in list(ann.parameters())]# Example: first layer weights
+        penn_params = [param.cpu().detach().numpy() for param in list(penn.parameters())]  # Example: first layer weights
+
+        # Get two random directions
+        penn_dir1 = get_random_directions(penn_params)
+        penn_dir2 = get_random_directions(penn_params)
+
+        ann_dir1 = get_random_directions(ann_params)
+        ann_dir2 = get_random_directions(ann_params)
+
+        # Normalize the directions
+        penn_dir1 = normalize_direction(penn_dir1, penn_params)
+        penn_dir2 = normalize_direction(penn_dir2, penn_params)
+        ann_dir1 = normalize_direction(ann_dir1, ann_params)
+        ann_dir2 = normalize_direction(ann_dir2, ann_params)
+
+        ann_l1_size = ann.layer_1.weight.shape[0]
+        penn_l1_size = penn.mlp.layer_1.weight.shape[0]
+
+        alpha_range = (-100,100)
+        beta_range = (-100,100)
+        n_points = 50
+
+        alphas = np.linspace(alpha_range[0], alpha_range[1], n_points)
+        betas = np.linspace(beta_range[0], beta_range[1], n_points)
+        alpha_mesh, beta_mesh = np.meshgrid(alphas, betas)
+        # Create a grid of reduced parameters
+        # x1 = np.linspace(min(reduced_params1[:, 0]), max(reduced_params1[:, 0]), 20)
+        # y1 = np.linspace(min(reduced_params1[:, 1]), max(reduced_params1[:, 1]), 20)
+        # X1, Y1 = np.meshgrid(x1, y1)
+
+        # x2 = np.linspace(min(reduced_params2[:, 0]), max(reduced_params2[:, 0]), 20)
+        # y2 = np.linspace(min(reduced_params2[:, 1]), max(reduced_params2[:, 1]), 20)
+        # X2, Y2 = np.meshgrid(x2, y2)
+
+        # x1 = np.linspace(-1, 1, 50)
+        # y1 = np.linspace(-1, 1, 50)
+        # X1, Y1 = np.meshgrid(x1, y1)
+
+        # x2 = np.linspace(-1, 1, 50)
+        # y2 = np.linspace(-1, 1, 50)
+        # X2, Y2 = np.meshgrid(x2, y2)
+
+        # Compute loss for each point in the grid for both networks
+        Z1 = np.zeros_like(alpha_mesh)
+        Z2 = np.zeros_like(alpha_mesh)
+        for i in range(n_points):
+            for j in range(n_points):
+                alpha, beta = alpha_mesh[i, j], beta_mesh[i, j]
+                # Update model parameters
+                for param, orig, d1, d2 in zip(ann.parameters(), ann_params, ann_dir1, ann_dir2):
+                    delta = alpha * d1 + beta * d2
+                    param.data = torch.tensor(orig).float().to(ann.device) + torch.tensor(delta).float().to(ann.device)
+                Z1[i, j] = min(self.models[0].compute_loss_for_single_batch(ann), 100)
+        print("ANN loss surface", Z1)
+ 
+
+        for i in range(n_points):
+            for j in range(n_points):
+                alpha, beta = alpha_mesh[i, j], beta_mesh[i, j]
+                # Update model parameters
+                for param, orig, d1, d2 in zip(penn.parameters(), penn_params, penn_dir1, penn_dir2):
+                    delta = alpha * d1 + beta * d2
+                    param.data = torch.tensor(orig).float().to(penn.device) + torch.tensor(delta).float().to(penn.device)
+                Z2[i, j] = min(self.models[1].compute_loss_for_single_batch(penn), 100)
+                # print("loss",Z2[i, j])
+        print("PENN loss surface", Z2)
+        # for i in range(.shape[0]):
+        #     for j in range(X1.shape[1]):
+        #         # Reconstruct original parameters from reduced coordinates
+                
+        #         with torch.no_grad():
+        #             # list(ann.parameters())[0] = torch.tensor(reconstructed_params1).reshape(ann.layer_1.weight.shape)
+        #             ann.layer_1.weight.copy_(torch.tensor(reconstructed_params1).float().reshape(ann.layer_1.weight.shape))
+        #             assert torch.allclose(list(ann.parameters())[0], torch.tensor(reconstructed_params1).reshape(ann.layer_1.weight.shape).float().to(ann.device))
+        #         Z1[i, j] = self.models[0].compute_loss_for_single_batch(ann)
+        # print("ANN loss surface", Z1)
+        # for i in range(X2.shape[0]):
+        #     for j in range(X2.shape[1]):
+        #         # Reconstruct original parameters from reduced coordinates
+        #         reconstructed_params2 = pca2.inverse_transform(np.array([X2[i, j], Y2[i, j]]))
+        #         reconstructed_params2 = np.tile(reconstructed_params2,(penn_l1_size,1))
+        #         with torch.no_grad():
+        #             # list(penn.parameters())[0] = torch.tensor(reconstructed_params2).reshape(penn.mlp.layer_1.weight.shape)
+        #             penn.mlp.layer_1.weight.copy_(torch.tensor(reconstructed_params2).float().to(penn.device))
+        #             assert torch.allclose(list(penn.parameters())[0], torch.tensor(reconstructed_params2).reshape(penn.mlp.layer_1.weight.shape).float().to(penn.device))
+                
+        #         Z2[i, j] = self.models[1].compute_loss_for_single_batch(penn)
+
+        # Plot the 3D surfaces for both networks
+        fig = plt.figure(figsize=(12, 6))
+
+        ax1 = fig.add_subplot(121, projection='3d')
+        ax1.plot_surface(alpha_mesh, beta_mesh, Z1, cmap='viridis')
+        ax1.set_xlabel(f'Dir 1 (ANN)')
+        ax1.set_ylabel(f'Dir 2 (ANN)')
+        ax1.set_zlabel('Loss (Net1)')
+
+        ax2 = fig.add_subplot(122, projection='3d')
+        ax2.plot_surface(alpha_mesh, beta_mesh, Z2, cmap='viridis')
+        ax2.set_xlabel(f'Dir 1 (PENN)')
+        ax2.set_ylabel(f'Dir 2 (PENN)')
+        ax2.set_zlabel('Loss (Net2)')
+
+        plt.savefig(f'/data/ayush/Melt_Viscosity_Predictor/Melt_Viscosity_Predictor/Paper_Figs/loss_sufaces.png')
+
 # Helper functions
+
+def get_random_directions(params):
+    random_directions = []
+    for param in params:
+        random_directions.append(np.random.randn(*param.shape))
+    return random_directions
+
+def normalize_direction(direction, weights):
+    new_dir = []
+    for d, w in zip(direction, weights):
+        new_dir.append(d * (w / (np.linalg.norm(d) + 1e-10)))
+    return new_dir
 
 def merge_dict_list(dict_list):
     
@@ -376,25 +534,41 @@ if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-    split_name = "training_temp_split_0"
+    split_name = "training_mw_split_1"
+    SAMPLE = FeatureHeaders.mol_weight.value
     models = [#GPRModel(name = 'GPR', model_obj= HyperParam_GPR()),
     PENNModel(name= split_name + '_ANN', model_obj=Visc_ANN, device = device, training = False),
     # PENNModel(name = split_name + '_PENN_WLF_Hybrid', model_obj=Visc_PENN_WLF_Hybrid, device = device, training = False),
-    PENNModel(name = split_name + '_PENN_WLF', model_obj=Visc_PENN_WLF, device = device, training = False),
+    PENNModel(name = split_name + '_PENN_WLF_critadj', model_obj=Visc_PENN_WLF, device = device, training = False),]
     # PENNModel(name = split_name + '_PENN_WLF_SP', model_obj=Visc_PENN_WLF_SP, device = device, training = False),
-    PENNModel(name = split_name + '_PENN_Arrhenius', model_obj=Visc_PENN_Arrhenius, device = device, training = False),]
+    # PENNModel(name = split_name + '_PENN_Arrhenius', model_obj=Visc_PENN_Arrhenius, device = device, training = False),]
     # PENNModel(name = split_name + '_PENN_Arrhenius_SP', model_obj=Visc_PENN_Arrhenius_SP, device = device, training = False)]
     model_eval = ModelEval(split_name, models)
 
+    const_col_dict = {FeatureHeaders.mol_weight.value : [FeatureHeaders.shear_rate.value, FeatureHeaders.temp.value], 
+        FeatureHeaders.shear_rate.value : [FeatureHeaders.mol_weight.value, FeatureHeaders.temp.value],
+        FeatureHeaders.temp.value : [FeatureHeaders.mol_weight.value, FeatureHeaders.shear_rate.value]}
     # model_eval.evaluate_models()
+    model_eval.loss_surface_comparison()
 
-    model_eval.extrapolation_test("Mw_extrap",sample_col = FeatureHeaders.temp.value,
-                                    const_col = [FeatureHeaders.mol_weight.value, FeatureHeaders.shear_rate.value],
-                                    extrap_range_dict= {FeatureHeaders.mol_weight.value : np.power(10, np.linspace(2, 8)),
-                                                    FeatureHeaders.shear_rate.value : np.power(10, np.linspace(-5, 5)),
-                                                    FeatureHeaders.temp.value : np.linspace(300, 600)})
+    # model_eval.extrapolation_test(f"{SAMPLE}_extrap",sample_col = SAMPLE,
+    #                                 const_col = const_col_dict[SAMPLE],
+    #                                 extrap_range_dict= {FeatureHeaders.mol_weight.value : np.power(10, np.linspace(2, 8)),
+    #                                                 FeatureHeaders.shear_rate.value : np.power(10, np.linspace(-5, 5)),
+    #                                                 FeatureHeaders.temp.value : np.linspace(300, 600)})
 
-    model_eval.plot_constant_histograms(constant_names=[Visc_Constants.c1.value, Visc_Constants.c2.value, Visc_Constants.Tr.value], 
-                                                output_file=os.path.join(model_eval.sim_dir, "constants_mw.png"),
-                                                model_names_dict = {"ANN": "ANN", "PENN_WLF": "PENN"})
+    # var_to_const_dict = {FeatureHeaders.mol_weight.value : [Visc_Constants.a1.value, Visc_Constants.a2.value, Visc_Constants.Mcr.value], 
+    #     FeatureHeaders.shear_rate.value : [Visc_Constants.n.value, Visc_Constants.Scr.value],
+    #     FeatureHeaders.temp.value : [Visc_Constants.c1.value, Visc_Constants.c2.value, Visc_Constants.Tr.value]}
+
+    # for model in model_eval.models:
+    #     model_dir = model_eval.sim_dir
+    #     os.makedirs(model_dir, exist_ok=True)
+    #     pickle_file = os.path.join(model_dir, f"prediction_params_{model.name}.pickle")
+    #     with open(pickle_file, "wb") as f:
+    #         pickle.dump(model.prediction_data["constants"], f)
+
+    # model_eval.plot_constant_histograms(constant_names=var_to_const_dict[SAMPLE], 
+    #                                             output_file=os.path.join(model_eval.sim_dir, f"constants_{SAMPLE}.png"),
+    #                                             model_names_dict = {"ANN": "ANN", "PENN_WLF": "PENN"})
     

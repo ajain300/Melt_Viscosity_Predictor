@@ -1,6 +1,7 @@
 # This is the architecture for the Physics Enforced Neural Network for polymer melt viscosity.
-# It contains 4 classes: Visc_PENN for the overall architecture, MLP, for the MLP part of PENN
+# It contains 4 main classes: Visc_PENN for the overall architecture, MLP, for the MLP part of PENN
 # MolWeight and ShearRate classes which encode eta-Mw and eta-shear_rate trends.
+# Additional and optional classes are variations of the PENN
 # Author: ayush.jain@gatech.edu 
 #
 
@@ -30,6 +31,7 @@ class Visc_Constants(Enum):
     beta_shear = 'Beta_Shear'
     lnA = 'lnA'
     EaR = 'EaR'
+
 class Visc_PENN_Base(nn.Module):
     def __init__(self, n_fp, config,device, apply_gradnorm = False, n_params = 11, **kwargs):
         '''
@@ -69,9 +71,9 @@ class Visc_PENN_Base(nn.Module):
         self.train()
         # Record total loss
         final_loss_dict = {}
-        # Get the progress bar for later modification
+        
+        # TODO Get the progress bar 
         # Mini-batch training
-
         for batch_idx, (XX, M, S, T, P, visc) in enumerate(dataloader):
 
             optimizer.zero_grad()
@@ -88,12 +90,13 @@ class Visc_PENN_Base(nn.Module):
             
             optimizer.step()
 
+
             for key, val in step_losses.items():
                 if key in final_loss_dict.keys():
                     final_loss_dict[key] += val
                 else:
                     final_loss_dict[key] = val
-                
+            
         for key, val in step_losses.items():
             if key != LossTypes.tot_train.value:
                 final_loss_dict[key] /= len(dataloader)
@@ -111,13 +114,7 @@ class Visc_PENN_Base(nn.Module):
         loss = loss + a2_loss + a1_loss
 
         loss.backward()
-        # if self.grad_norm is not None:
-        #     for name, param in self.named_parameters():
-        #         if param.requires_grad:
-        #             print(name, param.grad)
-        #     loss = self.grad_norm.gradNorm_layer(loss, optimizer, lr2 = 0.0001)
-        
-        #torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+
         optimizer.step()
         return {LossTypes.tot_train.value : loss, LossTypes.a1.value : a1_loss, LossTypes.a2.value : a2_loss}
 
@@ -141,11 +138,6 @@ class Visc_PENN_Base(nn.Module):
             'training_complete': complete
         }
         torch.save(checkpoint, save_path)
-
-        # if self.grad_norm is not None:
-        #     dir_path = os.path.dirname(save_path)
-        #     self.grad_norm.plot_gradnorm_stats(os.path.join(dir_path, "gradnorm.png"))
-        #     print(f"SAVED GRADNORM at {os.path.join(dir_path, 'gradnorm.png')}")
 
     def load_checkpoint(self, load_path, optimizer, scheduler):
         """
@@ -680,13 +672,13 @@ class Visc_PENN_Arrhenius(Visc_PENN_Base):
         #Temp
         a_t = self.lnA + self.EaR*T
 
+        # Catch and print any extraneous predictions
         if (a_t > 2).any():
             print('caught invalid temp shift')
             filter_idx = (a_t > 2).nonzero(as_tuple=True)
             for i in filter_idx:
                 print('lnA', self.lnA[i], 'EaR', self.EaR[i], 'T', T[i], 'T_shift', a_t[i])
         
-        #NEW
         eta_0 = self.Mw_layer(M, self.alpha_1, self.alpha_2, self.beta_M, self.M_cr, self.k_1 + a_t)
         eta = self.Shear_layer(S, eta_0, self.n, self.beta_shear, self.crit_shear)
 
@@ -992,11 +984,6 @@ class ShearRate(nn.Module):
         self.HS = HeavySide(device)
     
     def forward(self, S, eta_0, n, beta, Scr):
-        #f_S = eta_0 - torch.pow(beta, -1)*(n)*(torch.log(torch.tensor(1).to(self.device) + torch.exp(torch.tensor(-1).to(self.device)*S_sc)) + S_sc)
-        # print("shear S", S)
-        #print("shear equ n", n)
-        #print("shear equ crit_shear", Scr)
-        #print("shear eta_0", eta_0)
         beta = torch.tensor(30).to(self.device)
         low_shear = eta_0 
         high_shear = eta_0 - n*(S-Scr)
@@ -1010,10 +997,7 @@ class ShearRate(nn.Module):
             nan_idx = (torch.isnan(f_S)==1).nonzero(as_tuple=True)
             for i in nan_idx:
                 print('eta0', eta_0[i], 'n',n[i], 'bshear', beta[i], 'crit_shear', Scr[i])
-        # if (eta_0>2).any():
-        #     print('eta0', eta_0, 'n',n, 'bshear', beta, 'crit_shear', Scr)
-        
-        # print(f_S)
+
         return f_S
 
 class HeavySide(nn.Module):

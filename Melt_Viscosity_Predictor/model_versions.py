@@ -31,6 +31,7 @@ import json
 import pickle
 import contextlib
 import io
+
 from typing import Dict
 
 MODEL_FOLDER = "model_fold"
@@ -614,8 +615,70 @@ class PENNModel(BaseModel):
                 model = self.model(self.fp_size, best_config, self.device).to(self.device)
                 model.load_trained_model(ckpt_path)
                 self.models[fold] = model
-            except:
+            except Exception as e:
                 print("Couldn't load model ", fold)
+                print(e)
+
+    def compute_loss_for_single_batch(self, net : Visc_PENN_Base):
+        fold_data_path = os.path.join(self.model_path, f"fold_{0}", "data_split.pkl")
+        with open(fold_data_path, 'rb') as f:
+            loaded_data = pickle.load(f)
+            fit_X = loaded_data["fit_X"]
+            eval_X = loaded_data["eval_X"]
+            fit_y = loaded_data["fit_Y"]
+            eval_y = loaded_data["eval_Y"]
+            self.fp_size = loaded_data["fp_size"]
+
+        fit_ten = [torch.tensor(a, requires_grad=True).to(self.device).float() for a in fit_X]
+        val_ten = [torch.tensor(a).to(self.device).float() for a in eval_X]
+        tr_load = DataLoader(MVDataset(*fit_ten, torch.tensor(fit_y).to(self.device).float()), batch_size = self.batch_size, shuffle = True)
+        val_load = DataLoader(MVDataset(*val_ten, torch.tensor(eval_y).to(self.device).float()), batch_size = self.batch_size, shuffle = True)
+       
+        val_loss, avg_val_loss = net.evaluate(tr_load, torch.nn.MSELoss())
+        return avg_val_loss.cpu().detach().numpy()
+    
+    # def get_param_around_min(self):
+    #     fold_data_path = os.path.join(self.model_path, f"fold_{0}", "data_split.pkl")
+    #     with open(fold_data_path, 'rb') as f:
+    #         loaded_data = pickle.load(f)
+    #         fit_X = loaded_data["fit_X"]
+    #         eval_X = loaded_data["eval_X"]
+    #         fit_y = loaded_data["fit_Y"]
+    #         eval_y = loaded_data["eval_Y"]
+    #         self.fp_size = loaded_data["fp_size"]
+        
+    #     # Setup dataloaders
+    #     fit_ten = [torch.tensor(a, requires_grad=True).to(self.device).float() for a in fit_X]
+    #     val_ten = [torch.tensor(a).to(self.device).float() for a in eval_X]
+    #     tr_load = DataLoader(MVDataset(*fit_ten, torch.tensor(fit_y).to(self.device).float()), batch_size = self.batch_size, shuffle = True)
+    #     val_load = DataLoader(MVDataset(*val_ten, torch.tensor(eval_y).to(self.device).float()), batch_size = self.batch_size, shuffle = True)
+    #    # If a configuration alreayd exists for this fold then use that else run hp tuning
+    #     config_path = os.path.join(self.model_path, f"fold_{model_fold}", "best_config.json")
+
+    #     with open(config_path, 'r') as f:
+    #         best_config = json.load(f)
+
+    #     # training
+    #     checkpoint_folder = os.path.join(self.model_path, f"fold_{model_fold}")
+    #     model = run_training(best_config, n_fp = self.fp_size, 
+    #                                                 train_loader = tr_load, 
+    #                                                 test_loader = val_load, 
+    #                                                 device = self.device, 
+    #                                                 EPOCHS = self.epochs, 
+    #                                                 model_arch = self.model, 
+    #                                                 ckpt_folder = checkpoint_folder, 
+    #                                                 logger = self.logger,
+    #                                                 apply_gradnorm = self.apply_gradnorm,
+    #                                                 lr = self.lr,
+    #                                                 run = self.run,
+    #                                                 fold = 0,
+    #                                                 reduce_lr_factor = self.reduce_lr_factor,
+    #                                                 save_params = True)
+
+
+
+        
+
 
 class HyperParam_GPR(BaseEstimator, RegressorMixin):
     def __init__(self, alpha=1e-10, length_scale=1.0, constant_value=1.0):
